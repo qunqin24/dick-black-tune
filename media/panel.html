@@ -195,6 +195,7 @@
       ? `<div class="list">${s.items.map((it, i) => snippetCard(it, i, s.items.length)).join('')}</div>`
       : `<div class="empty muted small" style="margin-top:12px">这个文件还没有录制片段。</div>`;
     const done = s.items.filter((i) => i.status === 'present').length;
+    const gitWarn = s.gitDirty ? `<div class="record-tip small" style="color:var(--warn)">⚠ 这个文件在 Git 里有没提交的改动：台上行号旁会有改动标记、文件名带 M。可以先提交挖空后的版本，或在「打字设置」里点「台上隐藏痕迹」。</div>` : '';
     return `<div class="section">
       <div class="file-head">
         <span class="file-name ellipsis" title="${esc(s.file.rel)}">${esc(s.file.name)}</span>
@@ -204,7 +205,7 @@
       </div>
       ${fileMenu(s)}
       <button class="primary record" data-act="record" ${sel ? '' : 'disabled'}>${recLabel}</button>
-      ${tip}${tools}${list}</div>`;
+      ${tip}${gitWarn}${tools}${list}</div>`;
   }
 
   function snippetCard(it, i, n) {
@@ -265,13 +266,15 @@
     const st = s.settings;
     const c = st.chunkSize;
     const d = st.typingDelay;
-    const cText = c === 1 ? '严格一键一字' : `多数 1 个，偶尔 ${c} 个`;
+    const cText = c === 1 ? '一键一个字' : `多数 1 个，偶尔 ${c} 个`;
     const note = `${c === 1 ? '一键一字' : `1～${c} 字/键`} · ${d}ms · 补全${st.completion ? '开' : '关'}`;
     return fold('settings', '打字设置', note, `
       <div class="setting"><div class="setting-head"><span>每按一次键出字</span><span class="muted small">${cText}</span></div>
         <input type="range" min="1" max="4" step="1" value="${c}" data-setting="chunkSize"></div>
       <div class="setting"><div class="setting-head"><span>字与字的间隔</span><span class="muted small">约 ${d} 毫秒</span></div>
         <input type="range" min="0" max="120" step="5" value="${d}" data-setting="typingDelay"></div>
+      <div class="setting"><div class="setting-head"><span>偶尔打错再删</span><span class="muted small">${st.typoRate ? `约 ${st.typoRate}%` : '从不打错'}</span></div>
+        <input type="range" min="0" max="5" step="0.5" value="${st.typoRate}" data-setting="typoRate"></div>
       <div class="setting"><label class="check"><input type="checkbox" data-bool="completion" ${st.completion ? 'checked' : ''}>
         <span>弹出代码补全<div class="desc muted small">像 IDE 一样弹补全列表和参数提示，长单词偶尔一下补完。</div></span></label>
         ${st.completion ? `<div class="setting-head" style="margin-top:8px"><span class="small">选补全前的停顿</span><span class="muted small">约 ${st.completionPause} 毫秒</span></div>
@@ -289,7 +292,14 @@
           <select data-text="imeTheme">${[['auto', '跟随系统'], ['light', '浅色'], ['dark', '深色']]
             .map(([v, t]) => `<option value="${v}" ${(st.imeTheme || 'auto') === v ? 'selected' : ''}>${t}</option>`).join('')}</select></div>` : ''}
         ${(st.chineseMode || 'human') === 'human' ? `<label class="check" style="margin-top:8px"><input type="checkbox" data-bool="chineseHint" ${st.chineseHint ? 'checked' : ''}>
-          <span>显示灰色提示文字<div class="desc muted small">光标处用灰字提示要打的中文；打错了切回英文按键会自动纠正。</div></span></label>` : ''}</div>`);
+          <span>显示灰色提示文字<div class="desc muted small">光标处用灰字提示还没打的中文（投影上观众也看得见）；开始用输入法拼写时会自动收起。打错了切回英文按键会自动纠正。</div></span></label>` : ''}</div>
+      <div class="setting"><div class="setting-head"><span>状态栏小图标</span>
+        <select data-text="statusBar">${[['show', '显示进度'], ['hide', '完全不显示']]
+          .map(([v, t]) => `<option value="${v}" ${(st.statusBar || 'show') === v ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+        <div class="desc muted small">「行、列」旁边的小图标和进度数字。选「完全不显示」时，进度只在面板里看。</div></div>
+      <div class="setting"><div class="setting-head"><span>台上隐藏痕迹</span>
+        <button data-act="toggleTraces">${s.tracesHidden ? '恢复显示' : '隐藏'}</button></div>
+        <div class="desc muted small">${s.tracesHidden ? '已在这个工作区关掉 Git 改动标记、隐藏 .dick-black-tune 目录。' : '在这个工作区关掉 Git 改动标记（行号旁的删除三角、文件名上的 M），并在资源管理器里隐藏 .dick-black-tune 目录。再点一次恢复。'}</div></div>`);
   }
 
   function toggleKey(s) {

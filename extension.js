@@ -19,6 +19,12 @@ let armed = false; // 演示模式
 let typeOverride = null; // 演示模式期间接管的 "type" 命令
 let imeOverrides = []; // 接管输入法的开始/结束，用来知道演示者正在用输入法打字
 let composing = false; // 输入法正在拼写（拼音还没上屏）
+let swallowing = false; // 正在打代码时误开了中文输入法：这次拼写整个吞掉
+
+function imeSwallow() {
+  const editor = vscode.window.activeTextEditor;
+  return !!(armed && session && !session.done && !session.paused && !session.human && editor && editor.document === session.editor.document);
+}
 let typed = new Set(); // 本轮演示已经打完的片段 id
 let session = null; // 正在打的片段
 
@@ -64,13 +70,14 @@ function activate(context) {
     vscode.window.onDidChangeTextEditorSelection(() => tree.refreshSoon()),
     vscode.workspace.onDidChangeTextDocument((e) => {
       if (session && session.paused && session.settled && e.document === session.editor.document) shiftPausedSession(e.contentChanges);
+      else if (session && e.contentChanges.length && e.document === session.editor.document) checkForeignEdit(session);
       if (e.document === (vscode.window.activeTextEditor && vscode.window.activeTextEditor.document)) tree.refreshSoon();
     }),
     vscode.workspace.onDidSaveTextDocument((doc) => {
       if (path.basename(doc.fileName) === MANIFEST_FILE) { refreshContexts(); tree.refresh(); }
     }),
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration('dickBlackTune')) { systemDark = null; tree.refresh(); }
+      if (e.affectsConfiguration('dickBlackTune')) { systemDark = null; updateStatus(); tree.refresh(); }
     }),
     vscode.workspace.onDidCloseTextDocument((doc) => {
       if (session && doc === session.editor.document) endSession();
@@ -115,11 +122,21 @@ function manifestPath(root) {
   return root ? path.join(dataDir(root), MANIFEST_FILE) : '';
 }
 
+const manifestCache = new Map(); // 文件路径 -> { mtime, size, raw }
+function readManifestRaw(file) {
+  const st = fs.statSync(file);
+  const hit = manifestCache.get(file);
+  if (hit && hit.mtime === st.mtimeMs && hit.size === st.size) return hit.raw;
+  const raw = fs.readFileSync(file, 'utf8');
+  manifestCache.set(file, { mtime: st.mtimeMs, size: st.size, raw });
+  return raw;
+}
+
 function loadManifest(root) {
   const file = manifestPath(root);
   if (!file || !fs.existsSync(file)) return { version: 1, snippets: [] };
   try {
-    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const data = JSON.parse(readManifestRaw(file));
     data.snippets = Array.isArray(data.snippets) ? data.snippets : [];
     return data;
   } catch (err) {
@@ -136,7 +153,10 @@ function saveManifest(root, data) {
 
 // 录制前的原文件备份：.dick-black-tune/backups/<文件路径>.orig
 function backupPath(root, target) {
-  return path.join(dataDir(root), 'backups', target.split('/').join('__') + '.orig');
+  const dir = path.join(dataDir(root), 'backups');
+  const file = path.join(dir, encodeURIComponent(target) + '.orig');
+  const legacy = path.join(dir, target.split('/').join('__') + '.orig');
+  return !fs.existsSync(file) && fs.existsSync(legacy) ? legacy : file;
 }
 
 function relTarget(root, doc) {
@@ -148,7 +168,8 @@ function snippetsFor(doc) {
   const root = rootFor(doc.uri);
   const rel = relTarget(root, doc);
   const base = path.basename(doc.uri.fsPath);
-  return loadManifest(root).snippets.filter((s) => s.target === rel || path.basename(s.target || '') === base);
+  return loadManifest(root).snippets.filter((s) => s.target === rel
+    || (path.basename(s.target || '') === base && !fs.existsSync(path.join(root, s.target || ''))));
 }
 
 const norm = (s) => s.replace(/\r\n?/g, '\n');
@@ -182,10 +203,11 @@ function pickSnippet(editor) {
   const doc = editor.document;
   const line = editor.selection.active.line;
   if (!doc.lineAt(line).isEmptyOrWhitespace) return null;
-  const pending = snippetsFor(doc).filter((s) => !typed.has(s.id));
+  const text = norm(doc.getText());
+  const pending = snippetsFor(doc).filter((s) => !typed.has(s.id) && findCode(text, s.code) < 0);
   if (!pending.length) return null;
-  let best = pending[0];
-  let bestScore = -1;
+  let best = null;
+  let bestScore = 1; // 至少上面紧挨的一行或下面一行要对上，免得在随便一个空行上开打
   for (const s of pending) {
     const sc = scoreAt(doc, line, s);
     if (sc > bestScore) { best = s; bestScore = sc; }
@@ -286,13 +308,10 @@ async function recordSelection() {
   const data = loadManifest(root);
   data.snippets.push(...recorded);
   saveManifest(root, data);
-  await doc.save();
+  await saveDoc(doc);
   refreshContexts();
   tree.refresh();
-  vscode.window.setStatusBarMessage(
-    recorded.length === 1 ? `迪克的黑调：已录制「${recorded[0].name}」` : `迪克的黑调：已录制 ${recorded.length} 段`,
-    4000,
-  );
+  notify('$(record)', recorded.length === 1 ? `已录制「${recorded[0].name}」` : `已录制 ${recorded.length} 段`);
 }
 
 function nameFor(prevLine, code, comment) {
@@ -309,14 +328,15 @@ async function resetDocument() {
   const editor = vscode.window.activeTextEditor;
   if (!editor) return;
   if (session) endSession();
+  await cleanup;
   const doc = editor.document;
   let removed = 0;
   for (const s of snippetsFor(doc)) {
     const text = norm(doc.getText());
     const at = findCode(text, s.code);
     if (at < 0) continue;
-    const start = doc.positionAt(at);
-    const end = doc.positionAt(at + s.code.length);
+    const start = normPos(text, at);
+    const end = normPos(text, at + s.code.length);
     await editor.edit((b) => b.replace(new vscode.Range(start, end), ''));
     removed++;
   }
@@ -328,10 +348,10 @@ async function resetDocument() {
     removed++;
   }
   typed = new Set([...typed].filter((id) => !snippetsFor(doc).some((s) => s.id === id)));
-  await doc.save();
+  await saveDoc(doc);
   tree.refresh();
   updateStatus();
-  vscode.window.setStatusBarMessage(`迪克的黑调：已重置，删掉了 ${removed} 段代码`, 4000);
+  notify('$(discard)', `已重置，删掉了 ${removed} 段代码`);
 }
 
 // 打了一半、或被打乱的片段：在它上下文锚点之间（本该只有空行的地方）出现了内容，返回这些内容所在的整行范围
@@ -343,7 +363,7 @@ function partialInfo(doc, s) {
   for (const o of snippetsFor(doc)) {
     if (o.id === s.id) continue;
     const at = findCode(text, o.code);
-    if (at >= 0) others.push([doc.positionAt(at).line, doc.positionAt(at + o.code.length).line]);
+    if (at >= 0) others.push([normPos(text, at).line, normPos(text, at + o.code.length).line]);
   }
   const before = s.before || [];
   const maxSpan = s.code.split('\n').length + 30;
@@ -366,35 +386,42 @@ function partialInfo(doc, s) {
   const strongCount = anchors.strong === undefined ? anchors.length : anchors.strong;
   for (let ai = 0; ai < anchors.length; ai++) {
     const anchor = anchors[ai];
-    let end = Math.min(doc.lineCount, anchor + 1 + maxSpan);
+    // 下面那行可能出现好几次：打了一半的代码里，被挪到下面单独一行的右括号（如「}」）也可能长得和它一样。
+    // 依次试每个候选：内容确实是这一段开头的那个优先；都不是时只拿第一个去判断「是不是打乱了」
+    const ends = [];
     if (s.after) {
-      end = -1;
-      for (let m = anchor + 1; m < doc.lineCount && m <= anchor + maxSpan; m++) {
-        if (trimAt(m) === s.after) { end = m; break; }
+      for (let m = anchor + 1; m < doc.lineCount && m <= anchor + maxSpan; m++) if (trimAt(m) === s.after) ends.push(m);
+    } else ends.push(Math.min(doc.lineCount, anchor + 1 + maxSpan));
+    let fallback = null;
+    for (let ei = 0; ei < ends.length; ei++) {
+      const end = ends[ei];
+      let a = -1;
+      let b = -1;
+      for (let m = anchor + 1; m < end; m++) {
+        if (!trimAt(m)) continue;
+        if (a < 0) a = m;
+        b = m;
       }
-      if (end < 0) continue;
+      if (a < 0) continue;
+      if (others.some(([x0, x1]) => x0 <= b && x1 >= a)) continue;
+      const range = new vscode.Range(a, 0, b, doc.lineAt(b).text.length);
+      // 区域里的内容必须真像这一段打出来的：是它的开头；或者（上下文完全对上时）第一行开头和它一样、只是后面打乱了。
+      // 否则可能是别人的代码（Go 里满是「}」「)」这样的行），绝不能当成打了一半去清掉
+      const prefix = typedPrefix(doc, s, range);
+      // anchor/end：这一段该待的区域（不含），range：区域里已经有的内容
+      if (prefix && prefix.len > 0) return { range, anchor, end, prefix };
+      if (ei === 0) {
+        const firstHave = doc.lineAt(a).text.trim();
+        const firstCode = norm(s.code).split('\n')[0].trim();
+        const need = Math.min(4, firstCode.length);
+        // 上面两行都对上（或上面一行和下面一行都对上），首行开头一样，而且整体只差几个字（打字时撞乱的样子）；
+        // 手工改写过的代码差得多，不算
+        const looksLike = (ai < strongCount || !!s.after) && firstHave.slice(0, need) === firstCode.slice(0, need)
+          && nearPrefix(norm(doc.getText(range)), norm(s.code));
+        if (looksLike) fallback = { range, anchor, end, prefix: null };
+      }
     }
-    let a = -1;
-    let b = -1;
-    for (let m = anchor + 1; m < end; m++) {
-      if (!trimAt(m)) continue;
-      if (a < 0) a = m;
-      b = m;
-    }
-    if (a < 0) continue;
-    if (others.some(([x0, x1]) => x0 <= b && x1 >= a)) continue;
-    const range = new vscode.Range(a, 0, b, doc.lineAt(b).text.length);
-    // 区域里的内容必须真像这一段打出来的：是它的开头；或者（上下文完全对上时）第一行开头和它一样、只是后面打乱了。
-    // 否则可能是别人的代码（Go 里满是「}」「)」这样的行），绝不能当成打了一半去清掉
-    const prefix = typedPrefix(doc, s, range);
-    const firstHave = doc.lineAt(a).text.trim();
-    const firstCode = norm(s.code).split('\n')[0].trim();
-    const need = Math.min(4, firstCode.length);
-    // 上面两行都对上；或者上面一行和下面一行都对上（再上一行可能是还没打的别的片段）
-    const looksLike = (ai < strongCount || !!s.after) && firstHave.slice(0, need) === firstCode.slice(0, need);
-    if (!(prefix && prefix.len > 0) && !looksLike) continue;
-    // anchor/end：这一段该待的区域（不含），range：区域里已经有的内容
-    return { range, anchor, end, prefix };
+    if (fallback) return fallback;
   }
   return null;
 }
@@ -419,17 +446,73 @@ function findPartialAt(editor) {
 function typedPrefix(doc, snippet, range) {
   const text = norm(snippet.code);
   const have = norm(doc.getText(range));
-  const pairs = findPairs(text, lineCommentFor(doc.languageId));
-  const tail = have.match(/[)\]}"'`]*$/)[0];
+  const pairs = scanSyntax(text, doc.languageId).pairs;
+  const tail = have.match(/[)\]}"'`\s]*$/)[0];
   for (let m = 0; m <= tail.length; m++) {
     const p = have.slice(0, have.length - m);
     if (!text.startsWith(p)) continue;
-    // 左边已经打了、右边还没打到的那些括号，编辑器里应该已经补在光标后面（里层的在前）
+    // 左边已经打了、右边还没打到的那些括号，编辑器里应该已经补在光标后面（里层的在前）；
+    // 有的已经被挪到了下面单独一行（{|} 中间回车时），那它在原文里也得是那一行的开头、缩进一样
     const pending = [...pairs].filter(([o, c]) => o < p.length && c >= p.length).map(([, c]) => c).sort((a, b) => a - b);
-    if (pending.map((c) => text[c]).join('') !== have.slice(have.length - m)) continue;
-    return { len: p.length, pending };
+    const rest = have.slice(p.length);
+    if (pending.map((c) => text[c]).join('') !== rest.replace(/\s/g, '')) continue;
+    const pre = [];
+    let ok = true;
+    let k = 0;
+    for (const c of pending) {
+      const at = rest.indexOf(text[c], k);
+      const between = rest.slice(k, at);
+      if (between.includes('\n')) {
+        const n0 = text.lastIndexOf('\n', c - 1);
+        const ind = text.slice(n0 + 1, c);
+        if (n0 < p.length || !/^[ \t]*$/.test(ind) || !between.endsWith('\n' + ind) || between.slice(0, -ind.length - 1).replace(/[ \t]/g, '')) { ok = false; break; }
+        pre.push(n0);
+      } else if (between) { ok = false; break; }
+      k = at + 1;
+    }
+    if (!ok) continue;
+    return { len: p.length, pending, pre };
   }
   return null;
+}
+
+// have 和片段某个开头只差几个字（编辑距离不超过 max(3, 15%)）：判断「打乱了」还是「人手改过」
+function nearPrefix(have, code) {
+  const a = have.slice(0, 400);
+  const limit = Math.max(3, Math.floor(a.length * 0.15));
+  const lev = (s, t) => {
+    let prev = Array.from({ length: t.length + 1 }, (_, j) => j);
+    for (let i = 1; i <= s.length; i++) {
+      const cur = [i];
+      for (let j = 1; j <= t.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (s[i - 1] === t[j - 1] ? 0 : 1));
+      prev = cur;
+    }
+    return prev[t.length];
+  };
+  for (let k = Math.max(0, a.length - limit); k <= Math.min(code.length, a.length + limit); k++) {
+    if (lev(a, code.slice(0, k)) <= limit) return true;
+  }
+  return false;
+}
+
+// findCode 等用的是换行归一成 \n 之后的文本；CRLF 文件里不能把这个下标直接交给 doc.positionAt
+function normPos(normText, offset) {
+  const before = normText.slice(0, offset);
+  const line = (before.match(/\n/g) || []).length;
+  return new vscode.Position(line, offset - (before.lastIndexOf('\n') + 1));
+}
+
+// 从 pos 往后走过一段（已归一的）文本，得到末尾位置
+function advancePos(pos, s) {
+  const parts = s.split('\n');
+  return parts.length === 1 ? pos.translate(0, s.length) : new vscode.Position(pos.line + parts.length - 1, parts[parts.length - 1].length);
+}
+
+// 插件自己保存文件时跳过「保存时格式化 / 整理 import」，免得 Go、Python 插件把只在片段里用到的 import 删掉
+async function saveDoc(doc) {
+  const editor = vscode.window.activeTextEditor;
+  if (editor && editor.document === doc) await vscode.commands.executeCommand('workbench.action.files.saveWithoutFormatting');
+  else await saveDoc(doc);
 }
 
 // 片段代码必须从行首开始、到行尾结束才算（避免误删别处碰巧相同的文字）
@@ -450,17 +533,19 @@ async function restoreDocument() {
   const editor = vscode.window.activeTextEditor;
   if (!editor) return;
   if (session) endSession();
+  await cleanup;
   const doc = editor.document;
   let filled = 0;
   for (const s of snippetsFor(doc)) {
     if (findCode(norm(doc.getText()), s.code) >= 0) continue;
-    const line = bestBlankLine(doc, s);
-    if (line < 0) continue;
-    await editor.edit((b) => b.replace(doc.lineAt(line).range, s.code));
+    const half = partialRange(doc, s);
+    const line = half ? -1 : bestBlankLine(doc, s);
+    if (!half && line < 0) continue;
+    await editor.edit((b) => b.replace(half || doc.lineAt(line).range, s.code));
     filled++;
   }
-  await doc.save();
-  vscode.window.setStatusBarMessage(`迪克的黑调：已还原 ${filled} 段代码`, 4000);
+  await saveDoc(doc);
+  notify('$(check-all)', `已填回 ${filled} 段代码`);
 }
 
 async function openManifest() {
@@ -504,20 +589,27 @@ function setArmed(on) {
       // 拼音输入法打第一个字母时，编辑器会把这个字母当普通按键送过来；靠输入法的开始/结束事件把它和真的英文按键区分开
       imeOverrides = [
         vscode.commands.registerCommand('compositionStart', (args) => {
+          // 正在打代码时误开了中文输入法（碰到 Caps Lock、Shift 切换等）：拼写过程全吞掉，每次变化当成一次按键，
+          // 不让随机汉字进代码。只有「停下来等你打中文」时才真的交给输入法
+          if (imeSwallow()) { swallowing = true; return undefined; }
           composing = true;
+          if (session && session.human) clearHumanHint(session); // 开始拼写了，灰字提示收起来，免得和输入法叠在一起
           return vscode.commands.executeCommand('default:compositionStart', args);
         }),
         vscode.commands.registerCommand('compositionEnd', async (args) => {
+          if (swallowing) { swallowing = false; return; }
           composing = false;
           await vscode.commands.executeCommand('default:compositionEnd', args);
+          if (session && session.human) updateHumanHint(session);
         }),
+        vscode.commands.registerCommand('compositionType', (args) => (swallowing ? step() : vscode.commands.executeCommand('default:compositionType', args))),
+        vscode.commands.registerCommand('replacePreviousChar', (args) => (swallowing ? step() : vscode.commands.executeCommand('default:replacePreviousChar', args))),
       ];
     } catch (err) {
       armed = false;
       vscode.window.showErrorMessage('无法接管键盘输入：可能和 Vim 等也接管输入的插件冲突，请先禁用它们。');
       return;
     }
-    vscode.window.setStatusBarMessage('迪克的黑调：演示模式已开启', 2500);
   } else {
     endSession();
     if (typeOverride) typeOverride.dispose();
@@ -525,17 +617,27 @@ function setArmed(on) {
     imeOverrides.forEach((d) => d.dispose());
     imeOverrides = [];
     composing = false;
-    vscode.window.setStatusBarMessage('迪克的黑调：演示模式已关闭', 2500);
+    swallowing = false;
   }
   vscode.commands.executeCommand('setContext', 'dickBlackTune.armed', armed);
   refreshContexts();
   tree.refresh();
   updateStatus();
+  flashToggle(on);
 }
 
 function refreshContexts() {
   const editor = vscode.window.activeTextEditor;
-  const capturing = armed && !!editor && snippetsFor(editor.document).length > 0;
+  // 只有这个文件还有没打完的片段（或正在打）时才接管回车、Tab、退格；全打完后这些键完全还给编辑器
+  let capturing = false;
+  if (armed && editor) {
+    const mine = snippetsFor(editor.document);
+    if (session && session.editor.document === editor.document && !session.done) capturing = true;
+    else if (mine.length) {
+      const text = norm(editor.document.getText());
+      capturing = mine.some((s) => findCode(text, s.code) < 0);
+    }
+  }
   vscode.commands.executeCommand('setContext', 'dickBlackTune.capturing', capturing);
   vscode.commands.executeCommand('setContext', 'dickBlackTune.typing', !!(session && !session.done && !session.paused));
   updateStatus();
@@ -599,27 +701,52 @@ async function onKey(args) {
       }
       if (!other) return passthrough(args);
       endSession();
-      await beginSession(editor, other);
+      await self(() => beginSession(editor, other));
       return step();
     }
     if (session.human) return humanKey(session, args);
-    if (!session.done) return step(); // 正在打或正在收尾
-    // 刚打完一段、光标还停在结尾：继续乱按也不出字；点到别处再按，才进入下一段
-    if (editor.selection.active.isEqual(session.cursor)) return;
+    if (!session.done) {
+      session.lastKeyAt = Date.now();
+      if (args.fallback === 'deleteLeft') return stepBack(); // 退格就是退格：删掉上一个字
+      if (args.fallback === 'deleteRight') return undefined; // Delete：光标后面没东西可删，什么也不发生
+      return step(); // 正在打或正在收尾
+    }
+    // 刚打完一段、光标还停在结尾：手还在连着乱按时多出来的键吞掉；停手一会儿再按，就是正常打字（可以退格改代码）
+    if (editor.selection.active.isEqual(session.cursor) && Date.now() - (session.lastKeyAt || 0) < 900) {
+      session.lastKeyAt = Date.now();
+      return;
+    }
     endSession();
   }
+  await cleanup;
 
   // 点在一段打了一半的代码附近：从断点接着打，不再从头另起一份
   const partial = findPartialAt(editor);
   if (partial) {
-    await resumePartial(editor, partial.snippet, partial.info);
+    await self(() => resumePartial(editor, partial.snippet, partial.info));
     return step();
   }
 
   const snippet = pickSnippet(editor);
   if (!snippet) return passthrough(args);
-  await beginSession(editor, snippet);
+  await self(() => beginSession(editor, snippet));
   return step();
+}
+
+// ---------- 打字途中，文件被插件以外的操作改了（⌘Z、粘贴、⌘⌫、保存时格式化……）----------
+// 插件自己的改动都包在 self() 里；其它时候出现的改动就是别人改的：立刻结束这一段，免得按旧位置接着打、
+// 收尾时还把挤进来的真代码整块换掉。之后再按键，会按文件里实际的内容重新认出打到哪、接着打
+let selfDepth = 0;
+let selfUntil = 0;
+async function self(fn) {
+  selfDepth++;
+  try { return await fn(); } finally { selfDepth--; selfUntil = Date.now() + 80; }
+}
+
+function checkForeignEdit(current) {
+  if (current.done || current.paused || current.human) return; // 等中文时，演示者用输入法改是正常的
+  if (selfDepth > 0 || Date.now() < selfUntil) return;
+  endSession();
 }
 
 // Esc：暂停这一段，已经打出来的留着；光标还在原处时再按键就接着打
@@ -632,6 +759,16 @@ async function pauseSession() {
   // 等手上这个字打完，之后文件里的改动才是演示者在别处改的
   await current.queue.catch(() => {});
   if (session !== current || !current.paused) return;
+  // 拼音打到一半：像真输入法按 Esc 一样，把还没上屏的拼音整段撤掉，接着打时这一组重新拼
+  if (current.ime && current.ime.shown) {
+    const ime = current.ime;
+    const range = new vscode.Range(ime.start, ime.start.translate(0, ime.shown.length));
+    if (current.editor.document.getText(range) === ime.shown) {
+      await self(() => current.editor.edit((b) => b.delete(range), { undoStopBefore: false, undoStopAfter: false }));
+    }
+    current.ime = null;
+    current.cursor = ime.start;
+  }
   current.settled = true;
   clearHumanHint(current);
   await hideSuggest(current);
@@ -664,10 +801,18 @@ function shiftPausedSession(changes) {
   }
 }
 
+let cleanup = Promise.resolve(); // 结束会话时清掉没上屏的拼音；之后要改文档的操作先等它做完
 function endSession() {
   if (!session) return;
-  clearHumanHint(session);
-  clearComposition(session);
+  const s = session;
+  clearHumanHint(s);
+  clearComposition(s);
+  if (s.ime && s.ime.shown && !s.done) {
+    const range = new vscode.Range(s.ime.start, s.ime.start.translate(0, s.ime.shown.length));
+    if (s.editor.document.getText(range) === s.ime.shown) {
+      cleanup = self(() => s.editor.edit((b) => b.delete(range), { undoStopBefore: false, undoStopAfter: false })).catch(() => {});
+    }
+  }
   session = null;
   refreshContexts();
   tree.refresh();
@@ -679,52 +824,85 @@ const OPENERS = { '(': ')', '[': ']', '{': '}' };
 const CLOSERS = new Set([')', ']', '}']);
 const QUOTES = new Set(['"', "'", '`']);
 
-// 找出片段里成对的括号和引号（像编辑器一样，打左边时先补上右边，打到右边时直接越过）。
-// 只配对能确定的：注释里的不算，字符串里的括号只和同一个字符串里的配对，单引号/双引号不跨行。
-function findPairs(text, lineComment) {
-  const pairs = new Map(); // 左边下标 -> 右边下标
+// 扫一遍片段，同时得到：
+//   pairs：成对的括号和引号（左边下标 -> 右边下标），打左边时先补上右边、打到右边时直接越过，和编辑器一样；
+//   mask：哪些字符是「代码」（不在字符串、注释里），只有打代码时才像 IDE 一样弹补全。
+// 认得：行注释、/* 块注释 */（C 系语言）、Python 三引号字符串、Python f-string 和 JS 模板字符串里 {…} / ${…} 的表达式。
+function scanSyntax(text, languageId) {
+  const lc = lineCommentFor(languageId);
+  const blockComments = lc === '//';
+  const py = languageId === 'python';
+  const mask = new Uint8Array(text.length);
+  const pairs = new Map();
   const frames = [[]]; // 每进一个字符串开一层括号栈，字符串结束时丢弃没配上的
-  let quote = null;
-  let quoteStart = -1;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (quote) {
-      if (ch === '\\') { i++; continue; }
-      if (ch === quote) { pairs.set(quoteStart, i); quote = null; frames.pop(); continue; }
-      if (ch === '\n' && quote !== '`') { quote = null; frames.pop(); continue; }
-    } else {
-      if (lineComment && text.startsWith(lineComment, i)) {
-        while (i < text.length && text[i] !== '\n') i++;
-        continue;
-      }
-      if (QUOTES.has(ch)) { quote = ch; quoteStart = i; frames.push([]); continue; }
-    }
+  const interp = []; // 正在字符串里的 {表达式} 中：外面那个字符串、表达式的左大括号
+  let str = null; // 当前所在的字符串 { q, start, triple, fmt }
+  const pairBracket = (i, ch) => {
     const stack = frames[frames.length - 1];
     if (OPENERS[ch]) stack.push(i);
     else if (CLOSERS.has(ch) && stack.length && OPENERS[text[stack[stack.length - 1]]] === ch) pairs.set(stack.pop(), i);
-  }
-  return pairs;
-}
-
-// 标出哪些字符是"代码"（不在字符串、注释里）：只有打代码时才像 IDE 一样弹补全
-function codeMask(text, lineComment) {
-  const mask = new Uint8Array(text.length);
-  let quote = null;
+  };
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
-    if (quote) {
+    if (str) {
       if (ch === '\\') { i++; continue; }
-      if (ch === quote || (ch === '\n' && quote !== '`')) quote = null;
+      if (str.triple) {
+        if (text.startsWith(str.q.repeat(3), i)) { i += 2; str = null; }
+        continue;
+      }
+      if (str.fmt && ch === '{' && text[i + 1] === '{' && str.q !== '`') { i++; continue; } // f-string 里的 {{ 是普通字符
+      const opensExpr = str.fmt && (str.q === '`' ? ch === '$' && text[i + 1] === '{' : ch === '{');
+      if (opensExpr) {
+        const brace = str.q === '`' ? i + 1 : i;
+        interp.push({ str, open: brace });
+        str = null;
+        frames.push([brace]);
+        mask[brace] = 1;
+        i = brace;
+        continue;
+      }
+      if (ch === str.q) { pairs.set(str.start, i); str = null; frames.pop(); continue; }
+      if (ch === '\n' && str.q !== '`') { str = null; frames.pop(); continue; }
+      pairBracket(i, ch); // 字符串里的括号只和同一个字符串里的配对
       continue;
     }
-    if (lineComment && text.startsWith(lineComment, i)) {
+    if (ch === '}' && interp.length) {
+      const top = interp[interp.length - 1];
+      const stack = frames[frames.length - 1];
+      if (stack.length === 1 && stack[0] === top.open) { // {表达式} 结束，回到外面的字符串里
+        pairs.set(top.open, i);
+        mask[i] = 1;
+        frames.pop();
+        str = top.str;
+        interp.pop();
+        continue;
+      }
+    }
+    if (lc && text.startsWith(lc, i)) {
       while (i < text.length && text[i] !== '\n') i++;
       continue;
     }
-    if (QUOTES.has(ch)) { quote = ch; continue; }
+    if (blockComments && text.startsWith('/*', i)) {
+      const end = text.indexOf('*/', i + 2);
+      i = end < 0 ? text.length : end + 1;
+      continue;
+    }
+    if (py && (text.startsWith('"""', i) || text.startsWith("'''", i))) {
+      str = { q: ch, start: i, triple: true };
+      i += 2;
+      continue;
+    }
+    if (QUOTES.has(ch)) {
+      const before = text.slice(Math.max(0, i - 3), i);
+      const fmt = ch === '`' || (py && /(^|[^A-Za-z0-9_])([fF][rR]?|[rR][fF])$/.test(before));
+      str = { q: ch, start: i, triple: false, fmt };
+      frames.push([]);
+      continue;
+    }
     mask[i] = 1;
+    pairBracket(i, ch);
   }
-  return mask;
+  return { pairs, mask };
 }
 
 const isWordChar = (c) => !!c && /[A-Za-z0-9_]/.test(c);
@@ -737,26 +915,37 @@ function lineCommentFor(languageId) {
 
 async function beginSession(editor, snippet, resumeFrom) {
   let startPos = resumeFrom;
+  let keptIndent = 0;
+  const text = norm(snippet.code);
   if (!startPos) {
     const line = editor.document.lineAt(landingLine(editor.document, editor.selection.active.line, snippet));
-    // 清掉空行里的缩进，从行首开始：片段里自带正确的缩进
-    if (line.text.length > 0) {
+    if (line.text.length > 0 && /^[ \t]+$/.test(line.text) && text.startsWith(line.text)) {
+      keptIndent = line.text.length; // 空行里已经有正确的缩进（编辑器自动缩进留下的）：直接从缩进后面开始
+    } else if (line.text.length > 0) {
+      // 清掉空行里的缩进，从行首开始：片段里自带正确的缩进
       await editor.edit((b) => b.delete(line.range), { undoStopBefore: true, undoStopAfter: false });
     }
     startPos = new vscode.Position(line.lineNumber, 0);
-    editor.selection = new vscode.Selection(startPos, startPos);
+    const at = startPos.translate(0, keptIndent);
+    editor.selection = new vscode.Selection(at, at);
   }
+  const syntax = scanSyntax(text, editor.document.languageId);
   session = {
-    editor, snippet, text: norm(snippet.code), index: 0, done: false,
+    editor, snippet, text, index: 0, done: false,
     startPos, cursor: startPos,
-    pairs: findPairs(norm(snippet.code), lineCommentFor(editor.document.languageId)),
+    pairs: syntax.pairs,
     autoClosed: new Set(), // 已经提前补上的右括号/右引号（片段里的下标）
-    code: codeMask(norm(snippet.code), lineCommentFor(editor.document.languageId)),
+    code: syntax.mask,
     word: null, // 正在打的单词 { start, end, decided }
     suggestOpen: false,
     hintClosers: new Set(), // 打开了参数提示的函数调用，对应右括号的下标
+    preNewlines: new Set(), // 已经提前打好的换行（右括号被挪到下面单独一行时），片段里的下标
     queue: Promise.resolve(), backlog: 0,
   };
+  if (keptIndent) {
+    session.index = keptIndent;
+    session.cursor = startPos.translate(0, keptIndent);
+  }
   refreshContexts();
   tree.refresh();
 }
@@ -774,12 +963,13 @@ async function resumePartial(editor, snippet, info) {
   }
   await beginSession(editor, snippet, info.range.start);
   const s = session;
-  const cursor = doc.positionAt(doc.offsetAt(info.range.start) + got.len);
+  const cursor = advancePos(info.range.start, norm(doc.getText(info.range)).slice(0, got.len));
   s.index = got.len;
   s.autoClosed = new Set(got.pending);
+  s.preNewlines = new Set(got.pre || []);
   s.cursor = cursor;
   editor.selection = new vscode.Selection(cursor, cursor);
-  editor.revealRange(new vscode.Range(cursor, cursor), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+  editor.revealRange(new vscode.Range(cursor, cursor), vscode.TextEditorRevealType.Default);
   refreshContexts();
   tree.refresh();
 }
@@ -790,50 +980,119 @@ function step() {
   if (!current || current.done || current.finishing || current.paused || current.backlog >= 2) return;
   current.backlog++;
   current.queue = current.queue
-    .then(() => typeOneKey(current))
-    .catch((err) => console.error('[dickBlackTune]', err && err.stack || err))
+    .then(() => self(() => typeOneKey(current)))
+    .catch((err) => {
+      console.error('[dickBlackTune]', err && err.stack || err);
+      // 出错了（比如编辑器刚被关掉）：先暂停这一段，不要卡住，点回原处再按键接着打
+      if (session === current && !current.done) pauseSession();
+    })
     .finally(() => { current.backlog--; });
   return current.queue;
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// 退格：删掉刚打的上一个字，进度退一格。换行、括号这种牵扯自动补全的位置不退（真人按了也只是删一个空白，不明显）
+function stepBack() {
+  const current = session;
+  if (!current || current.done || current.finishing || current.paused || current.backlog >= 2) return undefined;
+  current.backlog++;
+  current.queue = current.queue
+    .then(() => self(() => backOne(current)))
+    .catch((err) => console.error('[dickBlackTune]', err && err.stack || err))
+    .finally(() => { current.backlog--; });
+  return current.queue;
+}
+
+async function backOne(current) {
+  if (session !== current || current.done || current.paused || current.human || current.ime) return;
+  if (wrongEditor(current)) return;
+  const { editor, text } = current;
+  const pos = current.cursor;
+  if (current.typo) { // 刚好有个打错的字母：正好删掉它
+    const t = current.typo;
+    current.typo = null;
+    await editor.edit((b) => b.delete(new vscode.Range(t.pos, t.pos.translate(0, 1))), { undoStopBefore: false, undoStopAfter: false });
+    moveCursor(current, t.pos);
+    return;
+  }
+  const i = current.index - 1;
+  if (i < 0 || pos.character === 0) return;
+  const ch = text[i];
+  if (ch === '\n' || current.pairs.has(i) || [...current.pairs.values()].includes(i)) return;
+  const prev = pos.translate(0, -1);
+  if (editor.document.getText(new vscode.Range(prev, pos)) !== ch) return;
+  await editor.edit((b) => b.delete(new vscode.Range(prev, pos)), { undoStopBefore: false, undoStopAfter: false });
+  current.index = i;
+  current.word = null;
+  moveCursor(current, prev);
+  await hideSuggest(current);
+  updateStatus();
+}
+
 // 一次按键像真人敲一下：多数时候出 1 个字，偶尔连出 2 个；字与字的间隔随机，
 // 标点后面稍停一下。按得慢字就出得慢，手一停字也跟着停。
+// 演示者切到了别的文件：先暂停这一段，排队中的按键不能写进别的文件；切回来点原处再按键就接着打
+function wrongEditor(current) {
+  const active = vscode.window.activeTextEditor;
+  if (!active || active.document !== current.editor.document) return true;
+  current.editor = active; // 切走再切回来时 VS Code 会换一个新的编辑器对象，跟着换
+  return false;
+}
+
 async function typeOneKey(current) {
   if (session !== current || current.done || current.finishing || current.human || current.paused) return;
+  if (wrongEditor(current)) { pauseSession(); return; }
   const cfg = vscode.workspace.getConfiguration('dickBlackTune');
   const maxChars = Math.max(1, cfg.get('chunkSize', 2));
   // 手感会时快时慢：整体速度在 0.7～1.4 倍之间慢慢漂移
   current.tempo = Math.min(1.4, Math.max(0.7, (current.tempo || 0.8 + Math.random() * 0.5) + (Math.random() - 0.5) * 0.12));
   const baseDelay = Math.max(0, cfg.get('typingDelay', 35)) * current.tempo;
-  // 刚打完一个词、准备打下一个词时，偶尔停一下想想
-  const prevCh = current.text[current.index - 1];
-  if (baseDelay && (prevCh === ' ' || prevCh === '\n' || prevCh === ',') && Math.random() < 0.08) {
-    await sleep(250 + Math.random() * 450);
-    if (session !== current) return;
+  // 停下来想一想：新起一行的开头最常停、停得也久；等号后面、def/func 之后次之；单词之间偶尔停一下
+  const { text } = current;
+  const idx = current.index;
+  const lineHead = text.slice(text.lastIndexOf('\n', idx - 1) + 1, idx);
+  const prevCh = text[idx - 1];
+  if (baseDelay) {
+    let chance = 0;
+    let ms = 0;
+    if (idx === 0 || /^[ \t]*$/.test(lineHead)) { chance = 0.22; ms = 400 + Math.random() * 900; }
+    else if (/(=|\b(def|func|function|return|class|if|for|while))\s*$/.test(lineHead)) { chance = 0.12; ms = 300 + Math.random() * 700; }
+    else if (prevCh === ' ' || prevCh === ',' || prevCh === '\t') { chance = 0.08; ms = 250 + Math.random() * 450; }
+    if (Math.random() < chance) {
+      await sleep(ms);
+      if (session !== current || current.paused) return;
+    }
   }
   const target = maxChars === 1 ? 1 : 1 + Math.floor(Math.random() * Math.random() * maxChars);
   let visible = 0;
   while (current.index < current.text.length && visible < target) {
     if (session !== current || current.paused) return;
+    if (wrongEditor(current)) { pauseSession(); return; }
     if (await maybeAcceptCompletion(current)) { visible = target; break; }
     const ch = current.text[current.index];
     const shown = await typeNext(current);
     if (shown === 'human') { updateStatus(); return; }
     if (shown) visible++;
     if (visible < target && baseDelay) {
-      const pause = /[,;:(){}[\]=]/.test(ch) ? 1.6 : 1;
+      // 要按 Shift 的符号和大写字母、数字，手指要挪远一点，慢一些
+      let pause = /[,;:(){}[\]=]/.test(ch) ? 1.6 : 1;
+      if (/[A-Z~!@#$%^&*()_+{}|:"<>?]/.test(ch)) pause *= 1.6 + Math.random() * 0.6;
+      else if (/[0-9]/.test(ch)) pause *= 1.4;
       await sleep(baseDelay * pause * (0.4 + Math.random() * 1.5));
     }
   }
-  // 紧跟着的空格一起打出，下一次按键总能看到新的字
-  while (session === current && !current.human && !current.paused && current.index < current.text.length && current.text[current.index] === ' ') {
-    await typeNext(current);
-  }
+  // 空格不单独占一下按键，和它后面的那个字一起出（单词刚打完时补全列表还开着，和真人一样）
   if (session === current && current.index >= current.text.length) await finish(current);
   updateStatus();
 }
+
+// 键盘上相邻的键（打错字时用）
+const NEAR_KEYS = {
+  q: 'wa', w: 'qes', e: 'wrd', r: 'etf', t: 'ryg', y: 'tuh', u: 'yij', i: 'uok', o: 'ipl', p: 'ol',
+  a: 'qsz', s: 'adw', d: 'sfe', f: 'dgr', g: 'fht', h: 'gjy', j: 'hku', k: 'jli', l: 'ko',
+  z: 'xa', x: 'zcs', c: 'xvd', v: 'cbf', b: 'vng', n: 'bmh', m: 'nj',
+};
 
 // 打出片段里的下一个"单位"：普通字符、或 换行+下一行缩进。返回是否出现了可见字符。
 async function typeNext(current) {
@@ -875,31 +1134,100 @@ async function typeNext(current) {
   }
 
   // 字母、数字、下划线、点：真的用编辑器的打字通道敲进去，IDE 会自己弹出补全列表、跟着过滤，和真人打字完全一样
-  const realType = isWordChar(ch) || (ch === '.' && current.code[i] && isWordChar(text[i - 1]));
-  if (completionOn() && realType && !current.pairs.has(i)) {
-    if (!editor.selection.isEmpty || !editor.selection.active.isEqual(pos)) editor.selection = new vscode.Selection(pos, pos);
+  // 刚才故意打错的那个字母：先愣一下，再像按了退格一样删掉
+  if (current.typo) {
+    const t = current.typo;
+    current.typo = null;
+    await sleep(80 + Math.random() * 200);
+    if (session !== current || current.paused) return true;
+    if (editor.document.getText(new vscode.Range(t.pos, t.pos.translate(0, 1))) === t.ch) {
+      await editor.edit((b) => b.delete(new vscode.Range(t.pos, t.pos.translate(0, 1))), { undoStopBefore: false, undoStopAfter: false });
+    }
+    moveCursor(current, t.pos);
+    return true;
+  }
+  // 偶尔打错：单词中间的小写字母，按到键盘上旁边的键，下一下再删掉
+  const typoRate = vscode.workspace.getConfiguration('dickBlackTune').get('typoRate', 1);
+  if (typoRate > 0 && current.code[i] && /[a-z]/.test(ch) && isWordChar(text[i - 1]) && i - (current.lastTypo || -99) > 30
+    && Math.random() * 100 < typoRate && NEAR_KEYS[ch]) {
+    const near = NEAR_KEYS[ch];
+    const wrong = near[Math.floor(Math.random() * near.length)];
+    await editor.edit((b) => b.insert(pos, wrong), { undoStopBefore: false, undoStopAfter: false });
+    current.typo = { pos, ch: wrong };
+    current.lastTypo = i;
+    moveCursor(current, pos.translate(0, 1));
+    return true;
+  }
+
+  const realType = isWordChar(ch) || (ch === '.' && current.code[i] && (isWordChar(text[i - 1]) || /[)\]]/.test(text[i - 1])));
+  if (completionOn() && realType && !current.pairs.has(i) && !wrongEditor(current)) {
+    if (editor.selections.length > 1 || !editor.selection.isEmpty || !editor.selection.active.isEqual(pos)) editor.selection = new vscode.Selection(pos, pos);
     // "." 在补全列表开着时会被当成"确认补全"，先把列表收起来
     if (ch === '.') await hideSuggest(current, true);
+    const before = editor.document.version;
     await vscode.commands.executeCommand('default:type', { text: ch });
+    if (editor.document.version === before && wrongEditor(current)) {
+      // 刚好这一刻切到了别的文件，字打进了别的文件：撤回那个字，这一段暂停，切回来点原处再按键接着打
+      const active = vscode.window.activeTextEditor;
+      if (active && active.document.isDirty) await vscode.commands.executeCommand('deleteLeft');
+      pauseSession();
+      return false;
+    }
     if (editor.document.lineAt(pos.line).text[pos.character] !== ch) {
       // 极少数情况下没敲进去（比如焦点不在编辑器）：改用直接插入，保证内容不出错
-      await editor.edit((b) => b.insert(pos, ch), { undoStopBefore: false, undoStopAfter: false });
+      const we = new vscode.WorkspaceEdit();
+      we.insert(editor.document.uri, pos, ch);
+      await vscode.workspace.applyEdit(we);
     }
     current.index = i + 1;
     const end = pos.translate(0, 1);
     current.cursor = end;
     if (!editor.selection.active.isEqual(end)) editor.selection = new vscode.Selection(end, end);
-    editor.revealRange(new vscode.Range(end, end), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+    editor.revealRange(new vscode.Range(end, end), vscode.TextEditorRevealType.Default);
     await afterChar(current, i, ch);
     return true;
   }
 
   let insert = ch;
   let next = i + 1;
+  if ((ch === ' ' || ch === '\t') && (i === 0 || text[i - 1] === '\n')) {
+    while (next < text.length && (text[next] === ' ' || text[next] === '\t')) next++;
+    insert = text.slice(i, next);
+  }
   if (ch === '\n') {
     // 换行时把下一行的缩进一起打出，相当于编辑器的自动缩进
     while (next < text.length && (text[next] === ' ' || text[next] === '\t')) next++;
     insert = text.slice(i, next);
+    const doc = editor.document;
+    const indent = next - i - 1;
+    // 这个换行之前已经替右括号打好了（右括号早被挪到了下面那一行）：光标直接移到下一行右括号前面
+    if (current.preNewlines.has(i)) {
+      current.preNewlines.delete(i);
+      const below = pos.line + 1 < doc.lineCount ? doc.lineAt(pos.line + 1).text : '';
+      if (below.slice(0, indent) === text.slice(i + 1, next) && below[indent] === text[next]) {
+        current.index = next;
+        moveCursor(current, new vscode.Position(pos.line + 1, indent));
+        await afterChar(current, i, ch);
+        return false;
+      }
+    }
+    // 光标后面还挂着自动补上的右括号（比如 {|} 中间回车）：像编辑器一样，右括号挪到下面单独一行，
+    // 光标留在中间的新行上。只在这个右括号在原文里也独占一行开头时才这样做（如 Python 的 foo(a,\n  b) 就不挪）
+    const rest = doc.lineAt(pos.line).text.slice(pos.character);
+    const c0 = current.autoClosed.size ? Math.min(...current.autoClosed) : -1;
+    if (rest && c0 >= 0 && rest[0] === text[c0]) {
+      const n0 = text.lastIndexOf('\n', c0 - 1);
+      const closerIndent = text.slice(n0 + 1, c0);
+      if (n0 > i && /^[ \t]*$/.test(closerIndent)) {
+        const ok = await editor.edit((b) => b.insert(pos, insert + '\n' + closerIndent), { undoStopBefore: false, undoStopAfter: false });
+        if (!ok) return false;
+        current.preNewlines.add(n0);
+        current.index = next;
+        moveCursor(current, new vscode.Position(pos.line + 1, indent));
+        await afterChar(current, i, ch);
+        return false;
+      }
+    }
   }
   let closer = '';
   if (current.pairs.has(i)) {
@@ -939,13 +1267,23 @@ function humanRunEnd(text, i) {
 
 let hintDeco = null;
 function showHumanHint(current) {
+  updateHumanHint(current);
+}
+
+// 灰色提示文字：只提示还没打的那部分，跟在已经打出的字后面；输入法拼写中不显示
+function updateHumanHint(current) {
   const h = current.human;
-  if (!h || !vscode.workspace.getConfiguration('dickBlackTune').get('chineseHint', true)) return;
+  if (!h || composing || !vscode.workspace.getConfiguration('dickBlackTune').get('chineseHint', true)) return clearHumanHint(current);
   if (!hintDeco) hintDeco = vscode.window.createTextEditorDecorationType({});
-  // 灰色提示文字：和 IDE 里 AI 补全的灰字一样，演示者照着用输入法打就行
+  const doc = current.editor.document;
+  const sel = current.editor.selection.active;
+  const lineText = doc.lineAt(h.startPos.line).text;
+  const typed = sel.line === h.startPos.line && sel.character >= h.startPos.character ? lineText.slice(h.startPos.character, sel.character) : '';
+  const rest = h.expected.startsWith(typed) ? h.expected.slice(typed.length) : '';
+  if (!rest) return clearHumanHint(current);
   current.editor.setDecorations(hintDeco, [{
-    range: new vscode.Range(h.startPos, h.startPos),
-    renderOptions: { after: { contentText: h.expected, color: new vscode.ThemeColor('editorGhostText.foreground'), fontStyle: 'normal' } },
+    range: new vscode.Range(sel, sel),
+    renderOptions: { after: { contentText: rest, color: new vscode.ThemeColor('editorGhostText.foreground'), fontStyle: 'normal' } },
   }]);
 }
 
@@ -975,9 +1313,16 @@ async function resumeHuman(current) {
 
 // 等中文期间的按键：输入法上屏的中文、退格照常进编辑器；英文字母（说明已切回英文）、回车、Tab 表示打完了，接着往下打
 async function humanKey(current, args) {
-  if (args.fallback === 'type' && args.text && /[^\x00-\x7f]/.test(args.text)) return passthrough(args);
-  if (args.fallback === 'deleteLeft' || args.fallback === 'deleteRight') return passthrough(args);
-  await resumeHuman(current);
+  if ((args.fallback === 'type' && args.text && /[^\x00-\x7f]/.test(args.text)) || args.fallback === 'deleteLeft' || args.fallback === 'deleteRight') {
+    await passthrough(args);
+    updateHumanHint(current);
+    return undefined;
+  }
+  // 一个中文都还没打就按英文键：多半是忘了切输入法。先不动（不让中文凭空出现），连按好几下还没打才替他补上
+  const h = current.human;
+  const lineNow = current.editor.document.lineAt(h.startPos.line).text;
+  if (lineNow === h.prefix + h.suffix && (h.idleKeys = (h.idleKeys || 0) + 1) < 6) return undefined;
+  await self(() => resumeHuman(current));
   return step();
 }
 
@@ -999,6 +1344,13 @@ function imeDark() {
     if (process.platform === 'darwin') {
       try {
         systemDark = /dark/i.test(require('child_process').execSync('defaults read -g AppleInterfaceStyle', { timeout: 1500, stdio: ['ignore', 'pipe', 'ignore'] }).toString());
+      } catch (err) { systemDark = false; }
+    } else if (process.platform === 'win32') {
+      // 微软拼音跟的是 Windows「应用模式」的浅色/深色，不是 VS Code 主题
+      try {
+        const out = require('child_process').execSync('reg query HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize /v AppsUseLightTheme',
+          { timeout: 1500, stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+        systemDark = /AppsUseLightTheme\s+REG_DWORD\s+0x0\b/.test(out);
       } catch (err) { systemDark = false; }
     } else {
       systemDark = vscode.window.activeColorTheme.kind === vscode.ColorThemeKind.Dark || vscode.window.activeColorTheme.kind === vscode.ColorThemeKind.HighContrast;
@@ -1045,6 +1397,7 @@ async function imeStep(current) {
 
   // 上屏：拼音换成汉字
   await sleep(80 + Math.random() * 220);
+  if (session !== current || current.paused || wrongEditor(current)) return true; // 停顿期间被暂停/结束了：先不上屏
   await editor.edit((b) => b.replace(range, ime.chars), { undoStopBefore: false, undoStopAfter: false });
   moveCursor(current, ime.start.translate(0, ime.chars.length));
   current.index += ime.chars.length;
@@ -1109,8 +1462,8 @@ function candidatesFor(ime) {
     if (left >= s.length) { done.push(s); left -= s.length; } else { partial = s.slice(0, left); left = 0; }
   }
   const covered = done.length + (partial ? 1 : 0);
-  // 首选永远是要打的那几个字（真输入法按空格上屏的就是首选）
-  const list = [ime.chars.slice(0, Math.max(1, covered))];
+  // 拼写途中按真实词频排（打出「c」时首选是「从」这类常用字）；拼音全部打完、准备按空格上屏时，要打的词排第一
+  const list = ime.typed >= ime.total ? [ime.chars] : [];
   try {
     if (covered >= 2) {
       const second = partial && done.length === 1 ? partial : done[1];
@@ -1131,7 +1484,8 @@ function candidatesFor(ime) {
     // 词库读不出来时退回只显示要打的字
     for (let n = covered - 1; n >= 1; n--) list.push(ime.chars.slice(0, n));
   }
-  return [...new Set(list.filter(Boolean))].slice(0, 7);
+  const out = [...new Set(list.filter(Boolean))].slice(0, 7);
+  return out.length ? out : [ime.chars.slice(0, Math.max(1, covered))];
 }
 
 function candidateSvg(cands, dark) {
@@ -1244,6 +1598,13 @@ function vscodeZoomFactor() {
   return Math.pow(1.2, best ? best.lv : level);
 }
 
+// 这一行离编辑器可视区底部不到 4 行：候选条画到上方
+function nearBottom(editor, pos) {
+  const vr = editor.visibleRanges;
+  if (!vr || !vr.length) return false;
+  return pos.line >= vr[vr.length - 1].end.line - 3;
+}
+
 function unzoom(built) {
   const z = vscodeZoomFactor();
   if (!built.svg || Math.abs(z - 1) < 0.001) return built;
@@ -1269,7 +1630,7 @@ function showComposition(current) {
         contentIconPath: svg.uri,
         width: `${svg.width}px`,
         height: `${svg.height}px`,
-        textDecoration: `none; position: absolute; top: 1.25em; margin-left: -${ime.shown.length}ch; z-index: 100; pointer-events: none; ${svg.css || ''}`,
+        textDecoration: `none; position: absolute; top: ${nearBottom(editor, end) ? `calc(-${svg.height}px - 0.35em)` : '1.25em'}; margin-left: -${ime.shown.length}ch; z-index: 100; pointer-events: none; ${svg.css || ''}`,
       },
     },
   }]);
@@ -1305,6 +1666,7 @@ async function afterChar(current, i, ch) {
     return;
   }
   await hideSuggest(current);
+  if (code[i] && ch === ',' && current.hintClosers.size) await vscode.commands.executeCommand('editor.action.triggerParameterHints');
   if (code[i] && ch === '(' && isWordChar(prev) && current.pairs.has(i)) {
     current.hintClosers.add(current.pairs.get(i));
     await vscode.commands.executeCommand('editor.action.triggerParameterHints');
@@ -1320,15 +1682,21 @@ async function hideSuggest(current, force) {
 // 长单词打了几个字母后，有时像按 Tab 接受补全一样，剩下的部分一下子出来
 async function maybeAcceptCompletion(current) {
   const w = current.word;
-  if (!completionOn() || !w || w.decided || !current.suggestOpen) return false;
+  if (!completionOn() || !w || w.decided || !current.suggestOpen || current.typo) return false;
   const typedLen = current.index - w.start;
   if (typedLen < 3 || w.end - w.start < 7 || w.end - current.index < 3) return false;
   w.decided = true;
   const ccfg = vscode.workspace.getConfiguration('dickBlackTune');
   if (Math.random() * 100 >= ccfg.get('completionChance', 40)) return false;
-  // 像人一样：先看一眼补全列表，停顿一下再按 Tab 选中
+  const word = current.text.slice(w.start, w.end);
+  if (isDefinition(current, w)) return false; // 正在起名字（def xxx、xxx :=）：真实编辑器里列表里不会有它
+  // 像人一样：先看一眼补全列表，停顿一下再按 Tab 选中；同时查一下列表里排第一的是不是这个词
   const pause = Math.max(0, ccfg.get('completionPause', 300));
+  const top = topCompletion(current, word.slice(0, typedLen));
   await sleep(pause * (0.67 + Math.random() * 0.66)); // 补全列表弹出后，像人一样看一眼再按 Tab
+  if (session !== current || current.paused || wrongEditor(current)) return true; // 停顿期间被暂停/结束了：这次不补
+  const first = await Promise.race([top, sleep(250).then(() => null)]);
+  if (first !== word) return false; // 列表里排第一的不是它（或者根本没有）：老老实实接着打
   const rest = current.text.slice(current.index, w.end);
   const pos = current.cursor;
   const ok = await current.editor.edit((b) => b.insert(pos, rest), { undoStopBefore: false, undoStopAfter: false });
@@ -1341,11 +1709,62 @@ async function maybeAcceptCompletion(current) {
   return true;
 }
 
+// 这个词是不是正在被定义（真实编辑器的补全列表里不会出现还没写出来的新名字）
+function isDefinition(current, w) {
+  const { text } = current;
+  const lineStart = text.lastIndexOf('\n', w.start - 1) + 1;
+  let lineEnd = text.indexOf('\n', w.end);
+  if (lineEnd < 0) lineEnd = text.length;
+  const before = text.slice(lineStart, w.start);
+  const after = text.slice(w.end, lineEnd);
+  if (/\b(def|func|function|class|var|let|const|type|struct|interface|import|package|from|as)\s+$/.test(before)) return true;
+  if (/^\s*:=/.test(after)) return true;
+  if (/^\s*=(?!=)/.test(after) && /^\s*([A-Za-z_][\w]*\s*,\s*)*$/.test(before)) return true;
+  return false;
+}
+
+// 补全列表此刻排第一的词：先问语言插件（和真的补全列表同一来源）；没有语言插件时按编辑器的
+// 「文档里出现过的单词」补全来算，只有文件里别处出现过的词才会在列表里
+async function topCompletion(current, prefix) {
+  const low = prefix.toLowerCase();
+  const pick = (labels) => {
+    const c = [...new Set(labels.filter((l) => l && l.toLowerCase().startsWith(low)))];
+    c.sort((a, b) => (a.toLowerCase() === low ? -1 : 0) - (b.toLowerCase() === low ? -1 : 0) || a.localeCompare(b));
+    return c[0] || null;
+  };
+  try {
+    const doc = current.editor.document;
+    const list = await vscode.commands.executeCommand('vscode.executeCompletionItemProvider', doc.uri, current.cursor);
+    const items = (list && list.items) || [];
+    if (items.length) {
+      const sorted = items.slice().sort((a, b) => String(a.sortText || labelOf(a)).localeCompare(String(b.sortText || labelOf(b))));
+      return pick(sorted.map(labelOf).map((l) => l.replace(/\(.*$/, '')));
+    }
+    // 没有任何语言插件：文档里别处出现过的单词（不算正在打的这个）
+    const cur = current.cursor;
+    const words = [];
+    for (let l = 0; l < doc.lineCount; l++) {
+      const t = doc.lineAt(l).text;
+      for (const m of t.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
+        if (l === cur.line && m.index <= cur.character && m.index + m[0].length >= cur.character) continue;
+        words.push(m[0]);
+      }
+    }
+    return pick(words);
+  } catch (err) {
+    return null;
+  }
+}
+
+function labelOf(item) {
+  return typeof item.label === 'string' ? item.label : (item.label && item.label.label) || '';
+}
+
 // 插入位置由插件自己记着，中途光标被方向键或鼠标挪走也不会打错地方
 function moveCursor(current, pos) {
   current.cursor = pos;
   current.editor.selection = new vscode.Selection(pos, pos);
-  current.editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+  current.editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.Default);
 }
 
 async function finish(current) {
@@ -1367,17 +1786,6 @@ async function finish(current) {
     moveCursor(current, new vscode.Position(startPos.line + parts.length - 1, parts[parts.length - 1].length));
   }
 
-  // 下一行紧挨着下一段的注释时补一个空行，保持段落之间的间隔
-  const endLine = current.cursor.line;
-  const comment = lineCommentFor(doc.languageId);
-  if (comment && endLine + 1 < doc.lineCount && doc.lineAt(endLine).text.length === current.cursor.character) {
-    const following = doc.lineAt(endLine + 1).text.trim();
-    if (following.startsWith(comment)) {
-      await editor.edit((b) => b.insert(current.cursor, '\n'), { undoStopBefore: false, undoStopAfter: true });
-      moveCursor(current, current.cursor);
-    }
-  }
-
   typed.add(current.snippet.id);
   current.done = true; // 收尾全部做完才算打完：之后按键会被吞掉，点别处才进入下一段
   refreshContexts();
@@ -1385,7 +1793,29 @@ async function finish(current) {
 }
 
 // 底栏状态：· 演示模式已开启；正在打时只显示进度数字
+// 所有操作结果都不在状态栏弹文字（投屏太显眼），只让右下角「行、列」旁边的小图标闪一下，约 1 秒后恢复；
+// 具体说明放在鼠标悬停提示里。开关：✓ / ⊘，录制 ●，重置 ↺，填回 ✓✓，保存 💾，恢复原文件 ⟲，删除 🗑
+let flashTimer = null;
+function statusHidden() {
+  return vscode.workspace.getConfiguration('dickBlackTune').get('statusBar', 'show') === 'hide';
+}
+
+function notify(icon, message) {
+  if (statusHidden()) return;
+  clearTimeout(flashTimer);
+  statusItem.text = icon;
+  statusItem.tooltip = `迪克的黑调：${message}`;
+  statusItem.show();
+  flashTimer = setTimeout(() => { flashTimer = null; updateStatus(); }, 1100);
+}
+
+function flashToggle(on) {
+  notify(on ? '$(check)' : '$(circle-slash)', on ? '演示模式已开启' : '演示模式已关闭');
+}
+
 function updateStatus() {
+  if (statusHidden()) return statusItem.hide(); // 台上完全不显示，进度只在面板里看
+  if (flashTimer && !session) return; // 正在闪开关提示，等它闪完
   if (!armed) return statusItem.hide();
   if (session) {
     // 底栏只显示进度数字，挨着「行、列」，投屏时不显眼
@@ -1403,6 +1833,58 @@ function updateStatus() {
     statusItem.tooltip = '迪克的黑调：演示模式已开启（在侧边栏面板里关闭）';
   }
   statusItem.show();
+}
+
+// ---------- 台上隐藏痕迹 ----------
+// 挖空后的文件和 Git 里的版本不一样：行号旁有红色删除三角、文件名带 M，打完这些标记又全消失，像是代码本来就在。
+// 一键在这个工作区里关掉 Git 改动标记，并在资源管理器里隐藏 .dick-black-tune；再点一次恢复原来的设置
+const TRACE_KEY = 'dickBlackTune.hiddenTraces';
+
+function tracesHidden() {
+  return !!ctx.workspaceState.get(TRACE_KEY);
+}
+
+async function toggleTraces() {
+  const ws = vscode.ConfigurationTarget.Workspace;
+  if (!vscode.workspace.workspaceFolders || !vscode.workspace.workspaceFolders.length) {
+    vscode.window.showErrorMessage('先用「文件 → 打开文件夹」打开演示用的工作区，才能在这个工作区里隐藏痕迹。');
+    return;
+  }
+  const scm = vscode.workspace.getConfiguration('scm');
+  const git = vscode.workspace.getConfiguration('git');
+  const files = vscode.workspace.getConfiguration('files');
+  if (!tracesHidden()) {
+    const prev = {
+      diff: scm.inspect('diffDecorations').workspaceValue,
+      deco: git.inspect('decorations.enabled').workspaceValue,
+      exclude: files.inspect('exclude').workspaceValue,
+    };
+    await scm.update('diffDecorations', 'none', ws);
+    await git.update('decorations.enabled', false, ws);
+    await files.update('exclude', Object.assign({}, prev.exclude || {}, { '.dick-black-tune': true, '.demo-typer': true }), ws);
+    await ctx.workspaceState.update(TRACE_KEY, prev);
+    notify('$(eye-closed)', '已隐藏 Git 改动标记和 .dick-black-tune 目录');
+  } else {
+    const prev = ctx.workspaceState.get(TRACE_KEY) || {};
+    await scm.update('diffDecorations', prev.diff, ws);
+    await git.update('decorations.enabled', prev.deco, ws);
+    await files.update('exclude', prev.exclude, ws);
+    await ctx.workspaceState.update(TRACE_KEY, undefined);
+    notify('$(eye)', '已恢复 Git 改动标记和 .dick-black-tune 目录的显示');
+  }
+}
+
+// 当前文件在 Git 里有没提交的改动（挖空后没提交）：面板上提醒一下
+function gitDirty(doc) {
+  try {
+    const ext = vscode.extensions.getExtension('vscode.git');
+    if (!ext || !ext.isActive) return false;
+    const api = ext.exports.getAPI(1);
+    const p = doc.uri.fsPath;
+    return api.repositories.some((r) => [...r.state.workingTreeChanges, ...r.state.indexChanges].some((c) => c.uri.fsPath === p));
+  } catch (err) {
+    return false;
+  }
 }
 
 // ---------- 快捷键：面板里列出来，点「修改」直接打开 VS Code 的快捷键设置 ----------
@@ -1511,7 +1993,7 @@ class PanelProvider {
   }
 
   refresh() {
-    if (this.view) this.view.webview.postMessage({ type: 'state', state: panelState() });
+    if (this.view && this.view.visible) this.view.webview.postMessage({ type: 'state', state: panelState() });
   }
 
   // 打字、移动光标时状态变化很频繁，合并成一次刷新
@@ -1531,6 +2013,7 @@ class PanelProvider {
       case 'restore': await restoreDocument(); break;
       case 'openManifest': await openManifest(); break;
       case 'editKey': await vscode.commands.executeCommand('workbench.action.openGlobalKeybindings', msg.command); break;
+      case 'toggleTraces': await toggleTraces(); break;
       case 'openFile': await openTarget(msg.target); break;
       case 'reveal': await revealSnippet(findSnippet(msg.id)); break;
       case 'fill': await fillOne(findSnippet(msg.id)); break;
@@ -1592,14 +2075,15 @@ async function saveCode(id, code) {
   const editor = vscode.window.activeTextEditor;
   if (editor && snippetsFor(editor.document).some((s) => s.id === id)) {
     const doc = editor.document;
-    const at = findCode(norm(doc.getText()), old.code);
+    const docText = norm(doc.getText());
+    const at = findCode(docText, old.code);
     if (at >= 0) {
-      await editor.edit((b) => b.replace(new vscode.Range(doc.positionAt(at), doc.positionAt(at + old.code.length)), newCode));
-      await doc.save();
+      await editor.edit((b) => b.replace(new vscode.Range(normPos(docText, at), normPos(docText, at + old.code.length)), newCode));
+      await saveDoc(doc);
     }
   }
   editSnippet(id, (s) => { s.code = newCode; });
-  vscode.window.setStatusBarMessage(`迪克的黑调：已保存「${old.name}」的代码`, 3000);
+  notify('$(save)', `已保存「${old.name}」的代码`);
 }
 
 function moveSnippet(id, dir) {
@@ -1642,13 +2126,14 @@ async function fillOne(s) {
   if (!s || !editor) return;
   const doc = editor.document;
   if (findCode(norm(doc.getText()), s.code) >= 0) return;
-  const line = bestBlankLine(doc, s);
-  if (line < 0) {
+  const half = partialRange(doc, s);
+  const line = half ? -1 : bestBlankLine(doc, s);
+  if (!half && line < 0) {
     vscode.window.showErrorMessage(`在当前文件里找不到「${s.name}」该放的空行。`);
     return;
   }
-  await editor.edit((b) => b.replace(doc.lineAt(line).range, s.code));
-  await doc.save();
+  await editor.edit((b) => b.replace(half || doc.lineAt(line).range, s.code));
+  await saveDoc(doc);
 }
 
 async function clearOne(s) {
@@ -1656,11 +2141,12 @@ async function clearOne(s) {
   if (!s || !editor) return;
   if (session && session.snippet.id === s.id) endSession();
   const doc = editor.document;
-  const at = findCode(norm(doc.getText()), s.code);
-  const range = at >= 0 ? new vscode.Range(doc.positionAt(at), doc.positionAt(at + s.code.length)) : partialRange(doc, s);
+  const docText = norm(doc.getText());
+  const at = findCode(docText, s.code);
+  const range = at >= 0 ? new vscode.Range(normPos(docText, at), normPos(docText, at + s.code.length)) : partialRange(doc, s);
   if (!range) return;
   await editor.edit((b) => b.replace(range, ''));
-  await doc.save();
+  await saveDoc(doc);
   typed.delete(s.id);
 }
 
@@ -1677,12 +2163,12 @@ async function restoreOriginal() {
     const original = fs.readFileSync(backup, 'utf8');
     const all = new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length));
     await editor.edit((b) => b.replace(all, original));
-    await doc.save();
-    vscode.window.setStatusBarMessage('迪克的黑调：已恢复成录制前的原文件', 4000);
+    await saveDoc(doc);
+    notify('$(history)', '已恢复成录制前的原文件');
     return true;
   }
   await restoreDocument();
-  vscode.window.setStatusBarMessage('迪克的黑调：没有录制前的备份，已把所有片段填回文件', 4000);
+  notify('$(history)', '没有录制前的备份，已把所有片段填回文件');
   return true;
 }
 
@@ -1709,7 +2195,7 @@ async function deleteAll(presetChoice) {
   ids.forEach((id) => typed.delete(id));
   const backup = backupPath(root, relTarget(root, doc));
   if (fs.existsSync(backup)) fs.unlinkSync(backup);
-  vscode.window.setStatusBarMessage(`迪克的黑调：已删除 ${mine.length} 段片段`, 4000);
+  notify('$(trash)', `已删除 ${mine.length} 段片段`);
 }
 
 async function openTarget(target) {
@@ -1777,10 +2263,14 @@ function panelState() {
       imeStyle: cfg.get('imeStyle', 'auto'),
       completionPause: cfg.get('completionPause', 300),
       completionChance: cfg.get('completionChance', 40),
+      typoRate: cfg.get('typoRate', 1),
+      statusBar: cfg.get('statusBar', 'show'),
     },
+    tracesHidden: tracesHidden(),
+    gitDirty: fileOk && mine.length > 0 && !tracesHidden() && gitDirty(doc),
     isMac: process.platform === 'darwin',
     keys: keybindingList(),
   };
 }
 
-module.exports = { activate, deactivate, findPairs };
+module.exports = { activate, deactivate, scanSyntax };

@@ -33,6 +33,11 @@ jobs:
             exit 1
           fi
 
+      - name: 语法检查
+        run: |
+          node --check extension.js
+          node -e "JSON.parse(require('fs').readFileSync('package.json','utf8')); JSON.parse(require('fs').readFileSync('lib/ime-dict.json','utf8'))"
+
       - name: 打包
         id: pack
         run: |

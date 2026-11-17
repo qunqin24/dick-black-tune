@@ -2,7 +2,7 @@
   "name": "dick-black-tune",
   "displayName": "迪克的黑调",
   "description": "现场演示用的 VS Code 插件：提前录好代码，台上点一下空行随便按键，编辑器里像真人一样一个字一个字打出预设的正确代码。",
-  "version": "0.18.2",
+  "version": "0.19.0",
   "publisher": "qunqin",
   "icon": "media/icon.png",
   "license": "MIT",
@@ -95,7 +95,7 @@
       {
         "command": "dickBlackTune.toggleDemo",
         "key": "ctrl+alt+d",
-        "mac": "cmd+alt+d"
+        "mac": "ctrl+alt+d"
       },
       {
         "command": "dickBlackTune.record",
@@ -115,7 +115,7 @@
           "fallback": "type",
           "text": "\n"
         },
-        "when": "editorTextFocus && dickBlackTune.capturing"
+        "when": "editorTextFocus && dickBlackTune.capturing && (dickBlackTune.typing || !suggestWidgetVisible && !inlineSuggestionVisible && !inSnippetMode)"
       },
       {
         "command": "dickBlackTune.key",
@@ -123,7 +123,7 @@
         "args": {
           "fallback": "deleteLeft"
         },
-        "when": "editorTextFocus && dickBlackTune.capturing"
+        "when": "editorTextFocus && dickBlackTune.capturing && (dickBlackTune.typing || !suggestWidgetVisible && !inlineSuggestionVisible && !inSnippetMode)"
       },
       {
         "command": "dickBlackTune.key",
@@ -131,7 +131,7 @@
         "args": {
           "fallback": "deleteRight"
         },
-        "when": "editorTextFocus && dickBlackTune.capturing"
+        "when": "editorTextFocus && dickBlackTune.capturing && (dickBlackTune.typing || !suggestWidgetVisible && !inlineSuggestionVisible && !inSnippetMode)"
       },
       {
         "command": "dickBlackTune.key",
@@ -139,7 +139,7 @@
         "args": {
           "fallback": "tab"
         },
-        "when": "editorTextFocus && dickBlackTune.capturing"
+        "when": "editorTextFocus && dickBlackTune.capturing && (dickBlackTune.typing || !suggestWidgetVisible && !inlineSuggestionVisible && !inSnippetMode)"
       },
       {
         "command": "dickBlackTune.key",
@@ -147,14 +147,14 @@
         "args": {
           "fallback": "outdent"
         },
-        "when": "editorTextFocus && dickBlackTune.capturing"
+        "when": "editorTextFocus && dickBlackTune.capturing && (dickBlackTune.typing || !suggestWidgetVisible && !inlineSuggestionVisible && !inSnippetMode)"
       }
     ],
     "menus": {
       "editor/context": [
         {
           "command": "dickBlackTune.record",
-          "when": "editorHasSelection",
+          "when": "editorHasSelection && !dickBlackTune.armed",
           "group": "9_dickBlackTune@1"
         }
       ],
@@ -274,6 +274,26 @@
           "minimum": 0,
           "maximum": 100,
           "description": "打长单词时，有多大概率像按 Tab 一样用补全一下补完（百分比）。"
+        },
+        "dickBlackTune.typoRate": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "maximum": 10,
+          "description": "偶尔打错字的概率（百分比）：单词中间按到键盘上旁边的键，下一下再删掉重打。0 就是从不打错。"
+        },
+        "dickBlackTune.statusBar": {
+          "type": "string",
+          "enum": [
+            "show",
+            "hide"
+          ],
+          "enumDescriptions": [
+            "在「行、列」旁边显示一个小图标和进度数字",
+            "完全不显示，进度只在面板里看"
+          ],
+          "default": "show",
+          "description": "状态栏里的小图标和进度数字。"
         }
       }
     }
