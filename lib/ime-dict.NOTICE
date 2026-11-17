@@ -1,0 +1,5 @@
+ime-dict.json 由 jieba 0.42.1 的词频词典（MIT 许可，https://github.com/fxsjy/jieba）生成，配合 pinyin-pro 标注拼音：
+- c：每个音节最常用的 12 个单字
+- w：每对音节最常用的 5 个双字词
+- f：以每个音节开头的最常用双字词
+- r：最常用的 4000 个字（按频率）

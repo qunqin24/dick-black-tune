@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src {{csp}} 'unsafe-inline'; script-src 'nonce-{{nonce}}';">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  :root {
+    --radius: 6px;
+    --border: var(--vscode-widget-border, var(--vscode-panel-border, rgba(128,128,128,.22)));
+    --muted: var(--vscode-descriptionForeground);
+    --raised: var(--vscode-editorWidget-background, rgba(128,128,128,.08));
+    --hover: var(--vscode-list-hoverBackground, rgba(128,128,128,.1));
+    --accent: var(--vscode-button-background);
+    --link: var(--vscode-textLink-foreground);
+    --ok: var(--vscode-testing-iconPassed, #3fb950);
+    --warn: var(--vscode-editorWarning-foreground, #d29922);
+    --danger: var(--vscode-errorForeground, #f14c4c);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 10px 12px 24px; color: var(--vscode-foreground); font-family: var(--vscode-font-family); font-size: 13px; line-height: 1.45; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12px; }
+  .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .grow { flex: 1; min-width: 0; }
+  .section { margin-top: 18px; }
+  .section:first-child { margin-top: 0; }
+  .section-title { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; letter-spacing: .04em; color: var(--muted); margin: 0 0 8px; }
+
+  button { font: inherit; border: 1px solid transparent; border-radius: 4px; padding: 5px 10px; cursor: pointer;
+    background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); white-space: nowrap; }
+  button:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground); }
+  button.primary { background: var(--accent); color: var(--vscode-button-foreground); }
+  button.primary:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
+  button.link { background: transparent; color: var(--link); padding: 2px 6px; }
+  button.link:hover:not(:disabled) { background: var(--hover); }
+  button.icon { background: transparent; color: var(--muted); padding: 2px 6px; }
+  button.icon:hover:not(:disabled), button.icon.on { background: var(--hover); color: var(--vscode-foreground); }
+  button.danger { color: var(--danger); }
+  button:disabled { opacity: .4; cursor: default; }
+  button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, summary:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+  .row { display: flex; gap: 6px; align-items: center; }
+
+  /* 演示模式 */
+  .demo { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; background: var(--raised); }
+  .demo.on { border-color: var(--accent); }
+  .demo-head { display: flex; align-items: center; gap: 10px; }
+  .demo-title { font-weight: 600; flex: 1; }
+  .switch { position: relative; width: 36px; height: 20px; border-radius: 10px; border: none; padding: 0; flex: none;
+    background: var(--vscode-input-background); box-shadow: inset 0 0 0 1px var(--border); }
+  .switch::after { content: ''; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%;
+    background: var(--muted); transition: transform .15s ease, background .15s ease; }
+  .switch.on { background: var(--accent); box-shadow: none; }
+  .switch.on::after { transform: translateX(16px); background: var(--vscode-button-foreground); }
+  .demo-body { margin: 6px 0 0 46px; }
+  .progress { height: 3px; border-radius: 2px; background: var(--vscode-input-background); overflow: hidden; margin-top: 6px; }
+  .progress > i { display: block; height: 100%; background: var(--accent); transition: width .15s linear; }
+  kbd { font-family: var(--vscode-editor-font-family); font-size: 11px; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; color: var(--muted); }
+
+  /* 当前文件 */
+  .file-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+  .file-name { font-weight: 600; }
+  .record { width: 100%; padding: 6px 10px; }
+  .record-tip { margin: 6px 2px 0; }
+  .tools { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
+  .menu { margin-top: 6px; border: 1px solid var(--border); border-radius: var(--radius); padding: 4px; background: var(--raised); }
+  .menu button { display: flex; width: 100%; gap: 8px; text-align: left; background: transparent; padding: 5px 8px; color: var(--vscode-foreground); }
+  .menu button:hover:not(:disabled) { background: var(--hover); }
+  .menu button.danger { color: var(--danger); }
+  .menu .desc { color: var(--muted); font-size: 12px; margin-left: auto; padding-left: 8px; }
+
+  /* 片段 */
+  .list { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+  .snip { border: 1px solid var(--border); border-radius: var(--radius); padding: 7px 8px 5px 10px; }
+  .snip.s-typing { border-color: var(--accent); }
+  .snip-head { display: flex; align-items: center; gap: 8px; }
+  .idx { width: 18px; height: 18px; border-radius: 50%; flex: none; display: grid; place-items: center; font-size: 11px; font-weight: 600;
+    background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
+  .idx.s-present { background: var(--ok); color: #fff; }
+  .idx.s-typing { background: var(--accent); color: var(--vscode-button-foreground); }
+  .idx.s-partial { background: var(--warn); color: #fff; }
+  .snip-name { font-weight: 600; flex: 1; font-family: var(--vscode-editor-font-family); font-size: 12px; }
+  .tag { font-size: 11px; white-space: nowrap; color: var(--muted); }
+  .tag.s-present { color: var(--ok); }
+  .tag.s-typing { color: var(--link); }
+  .tag.s-partial { color: var(--warn); }
+  .snip-meta { margin: 2px 0 2px 26px; }
+  .snip-actions { display: flex; align-items: center; gap: 0; margin-left: 20px; }
+  .snip-more { display: flex; flex-wrap: wrap; gap: 0; margin: 2px 0 2px 20px; padding-top: 4px; border-top: 1px dashed var(--border); }
+  pre.preview { margin: 6px 0 4px; padding: 6px 8px; border-radius: 4px; background: var(--vscode-textCodeBlock-background, rgba(128,128,128,.12));
+    font-family: var(--vscode-editor-font-family); font-size: 12px; white-space: pre; overflow-x: auto; max-height: 180px; }
+  textarea, input[type=text] { width: 100%; font-family: var(--vscode-editor-font-family); font-size: 12px; color: var(--vscode-input-foreground);
+    background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--border)); border-radius: 4px; padding: 5px 6px; }
+  input[type=text] { font-family: inherit; font-size: 13px; padding: 2px 6px; }
+  textarea { min-height: 140px; resize: vertical; tab-size: 4; white-space: pre; margin-top: 6px; }
+  .edit-row { margin: 6px 0 4px; flex-wrap: wrap; }
+
+  .empty { border: 1px dashed var(--border); border-radius: var(--radius); padding: 14px; text-align: center; }
+  .other { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+
+  /* 折叠区：设置、帮助 */
+  details.fold { border-top: 1px solid var(--border); padding-top: 10px; margin-top: 16px; }
+  details.fold > summary { list-style: none; cursor: pointer; font-size: 11px; font-weight: 600; letter-spacing: .04em; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  details.fold > summary::-webkit-details-marker { display: none; }
+  details.fold > summary::before { content: '›'; display: inline-block; width: 10px; transition: transform .12s ease; font-size: 14px; line-height: 1; }
+  details.fold[open] > summary::before { transform: rotate(90deg); }
+  details.fold > summary .summary-note { margin-left: auto; font-weight: 400; letter-spacing: 0; }
+  .fold-body { padding-top: 8px; }
+  .setting { padding: 6px 0; }
+  .setting + .setting { border-top: 1px solid var(--border); }
+  .setting-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .setting .desc { margin-top: 2px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); margin: 6px 0 0; }
+  .check { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; }
+  .check input { margin: 2px 0 0; accent-color: var(--accent); flex: none; }
+  select { font: inherit; font-size: 12px; color: var(--vscode-dropdown-foreground); background: var(--vscode-dropdown-background); border: 1px solid var(--vscode-dropdown-border, var(--border)); border-radius: 3px; padding: 2px 4px; }
+  .help h4 { margin: 4px 0 4px; font-size: 12px; }
+  .key-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+  .key-row + .key-row { border-top: 1px solid var(--border); }
+  .key-row .keys { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+  .help ol { padding-left: 18px; margin: 0 0 10px; }
+  .help li { margin-bottom: 3px; }
+</style>
+</head>
+<body>
+<div id="app"><p class="muted">加载中…</p></div>
+<script nonce="{{nonce}}">
+(function () {
+  const vscode = acquireVsCodeApi();
+  const app = document.getElementById('app');
+  let state = null;
+  const ui = Object.assign({ open: {}, editing: {}, renaming: {}, drafts: {}, more: {}, fileMenu: false, folds: {} }, vscode.getState() || {});
+  const save = () => vscode.setState(ui);
+  const send = (type, extra) => vscode.postMessage(Object.assign({ type }, extra || {}));
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  const STATUS = {
+    empty: '待打',
+    present: '已在文件里',
+    typing: '正在打',
+    partial: '打了一半',
+  };
+
+  function demoCard(s) {
+    const key = toggleKey(s);
+    let body;
+    if (!s.armed) {
+      body = '<span class="muted small">关闭中，键盘正常输入。上台前打开。</span>';
+    } else if (s.session && s.session.paused) {
+      body = `<span class="small">「${esc(s.session.name)}」已暂停 · ${s.session.pct}%。光标在原处时再按键继续；点别处可以正常打字，点回来还能接上。</span><div class="progress"><i style="width:${s.session.pct}%"></i></div>`;
+    } else if (s.session && s.session.waitingChinese) {
+      body = `<span class="small">等你用输入法打「${esc(s.session.waitingChinese)}」，打完切回英文继续按键</span><div class="progress"><i style="width:${s.session.pct}%"></i></div>`;
+    } else if (s.session && !s.session.done) {
+      body = `<span class="small">正在打「${esc(s.session.name)}」 · ${s.session.pct}%</span><div class="progress"><i style="width:${s.session.pct}%"></i></div>`;
+    } else if (s.session && s.session.done) {
+      body = `<span class="small">「${esc(s.session.name)}」打完了，点下一个空行继续敲。</span>`;
+    } else {
+      body = '<span class="small">点一下演示文件里的空行，随便敲键盘。</span>';
+    }
+    return `<div class="section"><div class="demo ${s.armed ? 'on' : ''}">
+        <div class="demo-head">
+          <button class="switch ${s.armed ? 'on' : ''}" data-act="toggleDemo" role="switch" aria-checked="${s.armed}" title="开启 / 关闭演示模式"></button>
+          <span class="demo-title">演示模式${s.armed ? '已开启' : '已关闭'}</span>
+          ${key ? `<kbd title="快捷键">${esc(key)}</kbd>` : ''}
+        </div>
+        <div class="demo-body">${body}</div>
+      </div></div>`;
+  }
+
+  function fileMenu(s) {
+    if (!ui.fileMenu) return '';
+    const hasItems = s.items.length > 0;
+    return `<div class="menu">
+      <button data-act="restoreOriginal" ${hasItems ? '' : 'disabled'}>⟲ 恢复原文件<span class="desc">${s.file.hasBackup ? '回到第一次录制前' : '没有备份，填回全部片段'}</span></button>
+      <button data-act="openManifest">{ } 打开配置文件<span class="desc">snippets.json</span></button>
+      <button class="danger" data-act="deleteAll" ${hasItems ? '' : 'disabled'}>✕ 删除全部片段<span class="desc">可选先恢复原文件</span></button>
+    </div>`;
+  }
+
+  function fileSection(s) {
+    if (!s.file) {
+      return `<div class="section"><div class="section-title">当前文件</div><div class="empty muted small">先在编辑器里打开要演示的文件。</div></div>`;
+    }
+    const sel = s.selectionLines;
+    const cnt = s.selectionCount || 0;
+    const recLabel = sel ? `● 录制选中代码（${cnt > 1 ? `${cnt} 段 · ` : ''}${sel} 行）` : '● 录制选中代码';
+    const anyPresent = s.items.some((i) => i.status === 'present' || i.status === 'partial');
+    const anyEmpty = s.items.some((i) => i.status === 'empty');
+    const tip = sel ? '' : `<div class="record-tip small muted">先在编辑器里选中代码；按住 <kbd>${s.isMac ? 'Option' : 'Alt'}</kbd> 拖选可一次录好几段。</div>`;
+    const tools = s.items.length ? `<div class="tools">
+        <button data-act="reset" ${anyPresent ? '' : 'disabled'} title="删掉已经打出来的代码（打了一半的也会清掉），回到演示前">↺ 重置</button>
+        <button data-act="restore" ${anyEmpty ? '' : 'disabled'} title="把所有代码一次性填回文件，方便运行完整程序">⤓ 全部填回</button>
+      </div>` : '';
+    const list = s.items.length
+      ? `<div class="list">${s.items.map((it, i) => snippetCard(it, i, s.items.length)).join('')}</div>`
+      : `<div class="empty muted small" style="margin-top:12px">这个文件还没有录制片段。</div>`;
+    const done = s.items.filter((i) => i.status === 'present').length;
+    return `<div class="section">
+      <div class="file-head">
+        <span class="file-name ellipsis" title="${esc(s.file.rel)}">${esc(s.file.name)}</span>
+        ${s.items.length ? `<span class="muted small">${done}/${s.items.length} 段在文件里</span>` : ''}
+        <span class="grow"></span>
+        <button class="icon ${ui.fileMenu ? 'on' : ''}" data-act="fileMenu" title="更多操作">⋯</button>
+      </div>
+      ${fileMenu(s)}
+      <button class="primary record" data-act="record" ${sel ? '' : 'disabled'}>${recLabel}</button>
+      ${tip}${tools}${list}</div>`;
+  }
+
+  function snippetCard(it, i, n) {
+    const cls = 's-' + it.status;
+    const open = ui.open[it.id];
+    const editing = ui.editing[it.id];
+    const renaming = ui.renaming[it.id];
+    const more = ui.more[it.id] || renaming;
+    const name = renaming
+      ? `<input type="text" data-rename="${it.id}" value="${esc(ui.drafts['n' + it.id] ?? it.name)}">`
+      : `<span class="snip-name ellipsis" title="${esc(it.name)}">${esc(it.name)}</span>`;
+    const tag = it.typedNow && it.status === 'present' ? '本轮已打完' : STATUS[it.status];
+    const fillOrClear = it.status === 'present' || it.status === 'partial'
+      ? `<button class="link" data-act="clear" data-id="${it.id}" title="从文件里删掉这一段，留一个空行">清空</button>`
+      : `<button class="link" data-act="fill" data-id="${it.id}" title="把这一段直接填回文件">填入</button>`;
+    let extra = '';
+    if (editing) {
+      extra = `<textarea data-code="${it.id}" spellcheck="false">${esc(ui.drafts['c' + it.id] ?? it.code)}</textarea>
+        <div class="row edit-row"><button class="primary" data-act="saveCode" data-id="${it.id}">保存</button><button data-act="cancelEdit" data-id="${it.id}">取消</button>
+        <span class="muted small">已在文件里的话会一起改</span></div>`;
+    } else if (open) {
+      extra = `<pre class="preview">${esc(it.code)}</pre>`;
+    }
+    const moreRow = more ? `<div class="snip-more">
+        ${renaming
+          ? `<button class="link" data-act="saveName" data-id="${it.id}">确定改名</button><button class="link" data-act="cancelRename" data-id="${it.id}">取消</button>`
+          : `<button class="link" data-act="startRename" data-id="${it.id}">改名</button>`}
+        <button class="link" data-act="startEdit" data-id="${it.id}" ${editing ? 'disabled' : ''}>编辑代码</button>
+        <button class="link" data-act="up" data-id="${it.id}" ${i === 0 ? 'disabled' : ''}>上移</button>
+        <button class="link" data-act="down" data-id="${it.id}" ${i === n - 1 ? 'disabled' : ''}>下移</button>
+        <span class="grow"></span>
+        <button class="link danger" data-act="remove" data-id="${it.id}">删除</button>
+      </div>` : '';
+    return `<div class="snip ${cls}">
+      <div class="snip-head"><span class="idx ${cls}">${i + 1}</span>${name}<span class="tag ${cls}">${tag}</span></div>
+      <div class="snip-meta small muted ellipsis" title="位置：「${esc(it.anchor)}」下面">在「${esc(it.anchor)}」下面 · ${it.lines} 行</div>
+      <div class="snip-actions">
+        <button class="link" data-act="reveal" data-id="${it.id}" title="在文件里跳到这一段的位置">定位</button>
+        <button class="link" data-act="toggleOpen" data-id="${it.id}">${open ? '收起' : '预览'}</button>
+        ${fillOrClear}
+        <span class="grow"></span>
+        <button class="icon ${more ? 'on' : ''}" data-act="toggleMore" data-id="${it.id}" title="改名、编辑、排序、删除">⋯</button>
+      </div>${moreRow}${extra}</div>`;
+  }
+
+  function othersSection(s) {
+    if (!s.others.length) return '';
+    return `<div class="section"><div class="section-title">其它文件${s.workspace ? ' · ' + esc(s.workspace) : ''}</div>
+      ${s.others.map((o) => `<div class="other"><span class="small ellipsis grow" title="${esc(o.target)}">${esc(o.target)}</span><span class="muted small">${o.count} 段</span><button class="link" data-act="openFile" data-target="${esc(o.target)}">打开</button></div>`).join('')}
+    </div>`;
+  }
+
+  function fold(key, title, note, body) {
+    return `<details class="fold" data-fold="${key}" ${ui.folds[key] ? 'open' : ''}><summary>${title}${note ? `<span class="summary-note small">${note}</span>` : ''}</summary><div class="fold-body">${body}</div></details>`;
+  }
+
+  function settingsSection(s) {
+    const st = s.settings;
+    const c = st.chunkSize;
+    const d = st.typingDelay;
+    const cText = c === 1 ? '严格一键一字' : `多数 1 个，偶尔 ${c} 个`;
+    const note = `${c === 1 ? '一键一字' : `1～${c} 字/键`} · ${d}ms · 补全${st.completion ? '开' : '关'}`;
+    return fold('settings', '打字设置', note, `
+      <div class="setting"><div class="setting-head"><span>每按一次键出字</span><span class="muted small">${cText}</span></div>
+        <input type="range" min="1" max="4" step="1" value="${c}" data-setting="chunkSize"></div>
+      <div class="setting"><div class="setting-head"><span>字与字的间隔</span><span class="muted small">约 ${d} 毫秒</span></div>
+        <input type="range" min="0" max="120" step="5" value="${d}" data-setting="typingDelay"></div>
+      <div class="setting"><label class="check"><input type="checkbox" data-bool="completion" ${st.completion ? 'checked' : ''}>
+        <span>弹出代码补全<div class="desc muted small">像 IDE 一样弹补全列表和参数提示，长单词偶尔一下补完。</div></span></label>
+        ${st.completion ? `<div class="setting-head" style="margin-top:8px"><span class="small">选补全前的停顿</span><span class="muted small">约 ${st.completionPause} 毫秒</span></div>
+          <input type="range" min="0" max="1500" step="50" value="${st.completionPause}" data-setting="completionPause">
+          <div class="setting-head" style="margin-top:6px"><span class="small">一下补完的频率</span><span class="muted small">${st.completionChance}%</span></div>
+          <input type="range" min="0" max="100" step="5" value="${st.completionChance}" data-setting="completionChance">` : ''}</div>
+      <div class="setting"><div class="setting-head"><span>代码里的中文</span>
+        <select data-text="chineseMode">${[['human', '停下来，我用输入法打'], ['fake', '模拟拼音输入法'], ['auto', '插件直接打出']]
+          .map(([v, t]) => `<option value="${v}" ${(st.chineseMode || 'human') === v ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+        ${st.chineseMode === 'fake' ? `<div class="desc muted small" style="margin-top:4px">按键时先打出带下划线的拼音、弹出仿系统样式的候选条，再上屏成汉字。</div>
+          <div class="setting-head" style="margin-top:8px"><span class="small">候选条样式</span>
+          <select data-text="imeStyle">${[['auto', '跟随系统'], ['mac', 'macOS'], ['microsoft', '微软拼音（Win10）']]
+            .map(([v, t]) => `<option value="${v}" ${(st.imeStyle || 'auto') === v ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+          <div class="setting-head" style="margin-top:8px"><span class="small">候选条颜色</span>
+          <select data-text="imeTheme">${[['auto', '跟随系统'], ['light', '浅色'], ['dark', '深色']]
+            .map(([v, t]) => `<option value="${v}" ${(st.imeTheme || 'auto') === v ? 'selected' : ''}>${t}</option>`).join('')}</select></div>` : ''}
+        ${(st.chineseMode || 'human') === 'human' ? `<label class="check" style="margin-top:8px"><input type="checkbox" data-bool="chineseHint" ${st.chineseHint ? 'checked' : ''}>
+          <span>显示灰色提示文字<div class="desc muted small">光标处用灰字提示要打的中文；打错了切回英文按键会自动纠正。</div></span></label>` : ''}</div>`);
+  }
+
+  function toggleKey(s) {
+    const k = (s.keys || []).find((x) => x.command === 'dickBlackTune.toggleDemo');
+    return k && k.keys.length ? k.keys[0] : '';
+  }
+
+  function keysSection(s) {
+    const rows = (s.keys || []).map((k) => `<div class="key-row">
+        <span class="grow">${esc(k.title)}</span>
+        <span class="keys">${k.keys.length ? k.keys.map((x) => `<kbd>${esc(x)}</kbd>`).join('') : '<span class="muted small">未设置</span>'}</span>
+        <button class="link" data-act="editKey" data-command="${esc(k.command)}" title="打开 VS Code 的键盘快捷方式设置">${k.keys.length ? '修改' : '设置'}</button>
+      </div>`).join('');
+    const set = (s.keys || []).filter((k) => k.keys.length).length;
+    return fold('keys', '快捷键', `${set} 个已设置`, `${rows}
+      <div class="muted small" style="margin-top:6px">点「修改」会打开 VS Code 的键盘快捷方式，双击那一行、按下想要的组合键、回车即可。改完这里自动更新。</div>`);
+  }
+
+  function helpSection(s) {
+    const key = toggleKey(s);
+    return fold('help', '使用帮助', '', `<div class="help small">
+      <h4>台上</h4><ol>
+        <li>切到<b>英文输入法</b>，打开「演示模式」${key ? `（或按 <kbd>${esc(key)}</kbd>）` : ''}。</li>
+        <li>点一下要写代码的<b>空行</b>，随便敲键盘。</li>
+        <li>一段打完再敲不会多出字；点下一个空行接着敲。</li>
+        <li>打到中文会停下来：切中文输入法照着灰字打，再切回英文继续。</li>
+        <li>想停一下就按 <kbd>Esc</kbd> 暂停；光标没动的话再按键就接着打。</li>
+      </ol>
+      <h4>彩排</h4><ol>
+        <li>练完点「↺ 重置」回到演示前；想跑完整程序点「⤓ 全部填回」。</li>
+        <li>单独练某一段：点它的「清空」再敲，「填入」补回。</li>
+        <li>右上角「⋯」里可以恢复原文件、删除全部片段。</li>
+      </ol></div>`);
+  }
+
+  function render() {
+    if (!state) return;
+    // 正在输入改名或代码时不打断
+    const active = document.activeElement;
+    if (active && (active.tagName === 'TEXTAREA' || (active.tagName === 'INPUT' && active.type === 'text'))) return;
+    app.innerHTML = demoCard(state) + fileSection(state) + othersSection(state) + settingsSection(state) + keysSection(state) + helpSection(state);
+  }
+
+  app.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-act]');
+    if (!btn || btn.disabled) return;
+    const act = btn.dataset.act;
+    const id = btn.dataset.id;
+    switch (act) {
+      case 'fileMenu': ui.fileMenu = !ui.fileMenu; save(); render(); return;
+      case 'toggleMore': ui.more[id] = !ui.more[id]; save(); render(); return;
+      case 'toggleOpen': ui.open[id] = !ui.open[id]; save(); render(); return;
+      case 'startEdit': ui.editing[id] = true; ui.open[id] = false; save(); render(); setTimeout(() => { const t = app.querySelector(`[data-code="${id}"]`); if (t) t.focus(); }); return;
+      case 'cancelEdit': delete ui.editing[id]; delete ui.drafts['c' + id]; save(); render(); return;
+      case 'saveCode': {
+        const t = app.querySelector(`[data-code="${id}"]`);
+        send('saveCode', { id, code: t ? t.value : '' });
+        delete ui.editing[id]; delete ui.drafts['c' + id]; save(); return;
+      }
+      case 'startRename': ui.renaming[id] = true; save(); render(); setTimeout(() => { const t = app.querySelector(`[data-rename="${id}"]`); if (t) { t.focus(); t.select(); } }); return;
+      case 'cancelRename': delete ui.renaming[id]; delete ui.drafts['n' + id]; save(); render(); return;
+      case 'saveName': {
+        const t = app.querySelector(`[data-rename="${id}"]`);
+        send('rename', { id, name: t ? t.value : '' });
+        delete ui.renaming[id]; delete ui.drafts['n' + id]; save(); return;
+      }
+      case 'up': send('move', { id, dir: -1 }); return;
+      case 'down': send('move', { id, dir: 1 }); return;
+      case 'openFile': send('openFile', { target: btn.dataset.target }); return;
+      case 'editKey': send('editKey', { command: btn.dataset.command }); return;
+      case 'restoreOriginal': case 'deleteAll': case 'openManifest':
+        ui.fileMenu = false; save(); send(act); return;
+      default: send(act, id ? { id } : undefined);
+    }
+  });
+
+  // 折叠区的展开状态记住
+  app.addEventListener('toggle', (e) => {
+    const d = e.target;
+    if (d.dataset && d.dataset.fold) { ui.folds[d.dataset.fold] = d.open; save(); }
+  }, true);
+
+  app.addEventListener('input', (e) => {
+    const t = e.target;
+    if (t.dataset.code) { ui.drafts['c' + t.dataset.code] = t.value; save(); }
+    if (t.dataset.rename) { ui.drafts['n' + t.dataset.rename] = t.value; save(); }
+  });
+
+  app.addEventListener('change', (e) => {
+    const t = e.target;
+    if (t.dataset.setting) send('setting', { key: t.dataset.setting, value: t.value });
+    if (t.dataset.bool) send('settingBool', { key: t.dataset.bool, value: t.checked });
+    if (t.dataset.text) send('settingText', { key: t.dataset.text, value: t.value });
+  });
+
+  app.addEventListener('keydown', (e) => {
+    const t = e.target;
+    if (t.dataset.rename && e.key === 'Enter') { e.preventDefault(); send('rename', { id: t.dataset.rename, name: t.value }); delete ui.renaming[t.dataset.rename]; save(); t.blur(); }
+    if (t.dataset.rename && e.key === 'Escape') { delete ui.renaming[t.dataset.rename]; save(); t.blur(); render(); }
+    // 代码框里按 Tab 插入制表符而不是跳走
+    if (t.dataset.code && e.key === 'Tab') {
+      e.preventDefault();
+      const s = t.selectionStart;
+      t.value = t.value.slice(0, s) + '\t' + t.value.slice(t.selectionEnd);
+      t.selectionStart = t.selectionEnd = s + 1;
+      ui.drafts['c' + t.dataset.code] = t.value; save();
+    }
+  });
+
+  app.addEventListener('focusout', () => setTimeout(render, 0));
+
+  window.addEventListener('message', (e) => {
+    if (e.data && e.data.type === 'state') { state = e.data.state; render(); }
+  });
+  send('ready');
+  // 报告缩放：插件用它把输入法候选条反向缩放，候选条不跟着 VS Code 缩放变大变小
+  function reportZoom() {
+    send('zoom', { dpr: window.devicePixelRatio });
+    matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`).addEventListener('change', reportZoom, { once: true });
+  }
+  reportZoom();
+})();
+</script>
+</body>
+</html>

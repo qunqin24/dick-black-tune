@@ -1,0 +1,296 @@
+{
+  "name": "dick-black-tune",
+  "displayName": "迪克的黑调",
+  "description": "现场演示用的 VS Code 插件：提前录好代码，台上点一下空行随便按键，编辑器里像真人一样一个字一个字打出预设的正确代码。",
+  "version": "0.18.0",
+  "publisher": "qunqin24",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "dickBlackTune.toggleDemo",
+        "title": "开启 / 关闭演示模式",
+        "category": "迪克的黑调"
+      },
+      {
+        "command": "dickBlackTune.startDemo",
+        "title": "开启演示模式",
+        "category": "迪克的黑调",
+        "icon": "$(play)"
+      },
+      {
+        "command": "dickBlackTune.stopDemo",
+        "title": "关闭演示模式",
+        "category": "迪克的黑调",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "dickBlackTune.record",
+        "title": "录制选中代码",
+        "category": "迪克的黑调",
+        "icon": "$(record)"
+      },
+      {
+        "command": "dickBlackTune.reset",
+        "title": "重置当前文件（删掉已打的代码）",
+        "category": "迪克的黑调",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "dickBlackTune.restore",
+        "title": "还原当前文件（填回全部代码）",
+        "category": "迪克的黑调",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "dickBlackTune.restoreOriginal",
+        "title": "恢复原文件（回到第一次录制之前）",
+        "category": "迪克的黑调"
+      },
+      {
+        "command": "dickBlackTune.deleteAll",
+        "title": "删除当前文件的全部片段",
+        "category": "迪克的黑调"
+      },
+      {
+        "command": "dickBlackTune.openManifest",
+        "title": "打开片段配置文件",
+        "category": "迪克的黑调",
+        "icon": "$(json)"
+      },
+      {
+        "command": "dickBlackTune.refresh",
+        "title": "刷新",
+        "category": "迪克的黑调",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "dickBlackTune.reveal",
+        "title": "跳到片段位置",
+        "category": "迪克的黑调"
+      },
+      {
+        "command": "dickBlackTune.key",
+        "title": "按键",
+        "category": "迪克的黑调"
+      },
+      {
+        "command": "dickBlackTune.escape",
+        "title": "暂停当前这一段（再按键继续）",
+        "category": "迪克的黑调"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "dickBlackTune.toggleDemo",
+        "key": "ctrl+alt+d",
+        "mac": "cmd+alt+d"
+      },
+      {
+        "command": "dickBlackTune.record",
+        "key": "ctrl+alt+r",
+        "mac": "cmd+alt+r",
+        "when": "editorTextFocus && editorHasSelection"
+      },
+      {
+        "command": "dickBlackTune.escape",
+        "key": "escape",
+        "when": "editorTextFocus && dickBlackTune.typing"
+      },
+      {
+        "command": "dickBlackTune.key",
+        "key": "enter",
+        "args": {
+          "fallback": "type",
+          "text": "\n"
+        },
+        "when": "editorTextFocus && dickBlackTune.capturing"
+      },
+      {
+        "command": "dickBlackTune.key",
+        "key": "backspace",
+        "args": {
+          "fallback": "deleteLeft"
+        },
+        "when": "editorTextFocus && dickBlackTune.capturing"
+      },
+      {
+        "command": "dickBlackTune.key",
+        "key": "delete",
+        "args": {
+          "fallback": "deleteRight"
+        },
+        "when": "editorTextFocus && dickBlackTune.capturing"
+      },
+      {
+        "command": "dickBlackTune.key",
+        "key": "tab",
+        "args": {
+          "fallback": "tab"
+        },
+        "when": "editorTextFocus && dickBlackTune.capturing"
+      },
+      {
+        "command": "dickBlackTune.key",
+        "key": "shift+tab",
+        "args": {
+          "fallback": "outdent"
+        },
+        "when": "editorTextFocus && dickBlackTune.capturing"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "dickBlackTune.record",
+          "when": "editorHasSelection",
+          "group": "9_dickBlackTune@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "dickBlackTune.reveal",
+          "when": "false"
+        },
+        {
+          "command": "dickBlackTune.key",
+          "when": "false"
+        },
+        {
+          "command": "dickBlackTune.escape",
+          "when": "false"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "dickBlackTune",
+          "title": "迪克的黑调",
+          "icon": "media/keyboard.svg"
+        }
+      ]
+    },
+    "views": {
+      "dickBlackTune": [
+        {
+          "type": "webview",
+          "id": "dickBlackTune.panel",
+          "name": "迪克的黑调"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "迪克的黑调",
+      "properties": {
+        "dickBlackTune.chunkSize": {
+          "type": "number",
+          "default": 2,
+          "minimum": 1,
+          "description": "每按一次键最多打出几个字（默认 2：多数时候 1 个，偶尔 2 个，像真人连敲）。设成 1 就是严格一键一字。"
+        },
+        "dickBlackTune.typingDelay": {
+          "type": "number",
+          "default": 35,
+          "minimum": 0,
+          "description": "同一次按键里字与字之间的平均间隔（毫秒）。实际间隔会随机浮动，整体快慢也会慢慢变化，单词之间偶尔停顿，像真人一样。"
+        },
+        "dickBlackTune.completion": {
+          "type": "boolean",
+          "default": true,
+          "description": "打字时像 IDE 一样弹出代码补全列表和函数参数提示，长单词有时会像按 Tab 接受补全一样一下子补完。"
+        },
+        "dickBlackTune.chineseMode": {
+          "type": "string",
+          "enum": [
+            "human",
+            "fake",
+            "auto"
+          ],
+          "enumDescriptions": [
+            "打到中文时停下来，演示者切到中文输入法自己打，打完切回英文继续按键",
+            "插件模拟拼音输入法：先打出带下划线的拼音、弹出候选条，再上屏成汉字",
+            "插件直接打出中文"
+          ],
+          "default": "human",
+          "description": "代码里的中文怎么打。"
+        },
+        "dickBlackTune.chineseHint": {
+          "type": "boolean",
+          "default": true,
+          "description": "等演示者打中文时，在光标处用灰字提示要打的内容。"
+        },
+        "dickBlackTune.imeTheme": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "light",
+            "dark"
+          ],
+          "enumDescriptions": [
+            "跟随系统外观",
+            "浅色",
+            "深色"
+          ],
+          "default": "auto",
+          "description": "模拟拼音输入法时候选条的颜色，和电脑系统外观保持一致。"
+        },
+        "dickBlackTune.imeStyle": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "mac",
+            "microsoft"
+          ],
+          "enumDescriptions": [
+            "跟随系统：Mac 上用 macOS 样式，Windows 上用微软拼音样式",
+            "macOS 自带拼音输入法的样式",
+            "Windows 10 微软拼音输入法的样式"
+          ],
+          "default": "auto",
+          "description": "模拟拼音输入法时候选条的样式。"
+        },
+        "dickBlackTune.completionPause": {
+          "type": "number",
+          "default": 300,
+          "minimum": 0,
+          "maximum": 5000,
+          "description": "补全列表弹出后，停顿多久再像按 Tab 一样一下补完（毫秒，实际会在这个值上下随机浮动）。"
+        },
+        "dickBlackTune.completionChance": {
+          "type": "number",
+          "default": 40,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "打长单词时，有多大概率像按 Tab 一样用补全一下补完（百分比）。"
+        }
+      }
+    }
+  },
+  "keywords": [
+    "demo",
+    "presentation",
+    "live coding",
+    "typing",
+    "演示",
+    "打字"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qunqin24/dick-black-tune.git"
+  },
+  "homepage": "https://github.com/qunqin24/dick-black-tune#readme",
+  "bugs": {
+    "url": "https://github.com/qunqin24/dick-black-tune/issues"
+  }
+}
