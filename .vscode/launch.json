@@ -1,0 +1,12 @@
+{
+  // 按 F5（Mac 上 fn+F5）：打开一个加载了源码插件的调试窗口，改完代码在那个窗口按 Cmd+R 重新加载
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "调试插件",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}"]
+    }
+  ]
+}
