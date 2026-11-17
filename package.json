@@ -2,8 +2,8 @@
   "name": "dick-black-tune",
   "displayName": "迪克的黑调",
   "description": "现场演示用的 VS Code 插件：提前录好代码，台上点一下空行随便按键，编辑器里像真人一样一个字一个字打出预设的正确代码。",
-  "version": "0.18.1",
-  "publisher": "qunqin24",
+  "version": "0.18.2",
+  "publisher": "qunqin",
   "icon": "media/icon.png",
   "license": "MIT",
   "engines": {

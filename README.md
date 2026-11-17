@@ -65,6 +65,15 @@ npx @vscode/vsce package --no-dependencies
 - 这个插件只在 VS Code 里有效，PyCharm 里用不了。
 - 「重置」会删掉已经打出来的代码；打了一半、或被打乱的（卡片上显示「打了一半」）也会按上下文认出来一起清掉。如果录制位置上下的代码被改过、认不出来，就用「恢复原文件」。
 
+## 发布到插件市场
+
+仓库已配置 GitHub Actions 受信任发布（`.github/workflows/publish.yml`）。先把 `package.json` 里的 `version` 改成新版本并提交，再推送同名标签即可自动发布：
+
+```bash
+git tag v0.18.2
+git push origin v0.18.2
+```
+
 ## 许可
 
 MIT，见 `LICENSE`。内置的第三方数据：`lib/pinyin-pro.js`（MIT，见 `lib/pinyin-pro.LICENSE`）；`lib/ime-dict.json` 由 jieba 词频词典（MIT）生成，见 `lib/ime-dict.NOTICE`。
