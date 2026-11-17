@@ -67,7 +67,7 @@ npx @vscode/vsce package --no-dependencies
 
 ## 发布到插件市场
 
-仓库已配置 GitHub Actions 受信任发布（`.github/workflows/publish.yml`）。先把 `package.json` 里的 `version` 改成新版本并提交，再推送同名标签即可自动发布：
+仓库已配置 GitHub Actions 受信任发布（`.github/workflows/publish.yml`）。先把 `package.json` 里的 `version` 改成新版本并提交，再推送同名标签，就会自动发布到插件市场，并创建 GitHub Release、附上 `.vsix`：
 
 ```bash
 git tag v0.18.2

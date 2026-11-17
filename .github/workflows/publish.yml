@@ -1,5 +1,8 @@
-# 推送 v 开头的版本标签（如 v0.18.2）时，自动发布到 VS Code 插件市场。
-# 用的是插件市场的「受信任的发布」（OIDC），不需要个人访问令牌。
+# 推送 v 开头的版本标签（如 v0.18.3）时：
+#   1. 打包成 .vsix
+#   2. 发布到 VS Code 插件市场（受信任的发布 / OIDC，不需要个人访问令牌）
+#   3. 创建 GitHub Release，附上同一个 .vsix
+# 也可以在 Actions 页面手动运行：只打包并发布到插件市场（版本已存在就跳过），不建 Release。
 name: 发布到插件市场
 
 on:
@@ -8,8 +11,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  id-token: write
+  contents: write # 创建 Release、上传 .vsix
+  id-token: write # 插件市场受信任发布
 
 jobs:
   publish:
@@ -30,5 +33,30 @@ jobs:
             exit 1
           fi
 
-      - name: 打包并发布
-        run: npx --yes @vscode/vsce@4.1.1 publish --oidc --no-dependencies
+      - name: 打包
+        id: pack
+        run: |
+          v=$(node -p "require('./package.json').version")
+          file="dick-black-tune-$v.vsix"
+          npx --yes @vscode/vsce@4.1.1 package --no-dependencies -o "$file"
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+
+      - name: 发布到插件市场
+        # --skip-duplicate：重跑时版本已经在市场上就跳过，不报错
+        run: npx --yes @vscode/vsce@4.1.1 publish --oidc --skip-duplicate --packagePath "${{ steps.pack.outputs.file }}"
+
+      - name: 创建 GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FILE: ${{ steps.pack.outputs.file }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            # 重跑时 Release 已经在了：只更新附件
+            gh release upload "$GITHUB_REF_NAME" "$FILE" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$FILE" \
+              --title "迪克的黑调 $GITHUB_REF_NAME" \
+              --generate-notes \
+              --notes "已同步上架 [VS Code 插件市场](https://marketplace.visualstudio.com/items?itemName=qunqin.dick-black-tune)。离线安装：下载下面的 .vsix，在 VS Code 里运行 Extensions: Install from VSIX...，装完运行一次 Developer: Reload Window。"
+          fi
